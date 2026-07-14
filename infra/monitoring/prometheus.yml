@@ -1,0 +1,59 @@
+# -------------------------------------------------------
+# Prometheus 指标采集配置 — 打卡管理工具
+# -------------------------------------------------------
+#
+# 部署说明：
+#   将本文件挂载至 Prometheus 容器的
+#   /etc/prometheus/prometheus.yml
+#
+# 启动 Prometheus（示例）：
+#   docker run -d --name prometheus \
+#     -p 9090:9090 \
+#     -v $(pwd)/prometheus.yml:/etc/prometheus/prometheus.yml \
+#     prom/prometheus
+
+global:
+  scrape_interval:     15s     # 采集间隔
+  evaluation_interval: 15s     # 规则评估间隔
+  scrape_timeout:      10s     # 单次采集超时
+
+# Alertmanager 配置（当前未启用告警通知）
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: []
+
+# 告警规则文件（后续可扩展）
+rule_files:
+  # - "alerts.yml"
+
+scrape_configs:
+  # ---------------------------------------------------------
+  # 打卡管理工具 API 服务
+  # ---------------------------------------------------------
+  - job_name: 'habit-tracking-api'
+    metrics_path: '/metrics'
+    scheme: http
+
+    # 静态服务发现（生产环境建议替换为 K8s / Consul / EC2 服务发现）
+    static_configs:
+      - targets:
+          - 'host.docker.internal:3000'   # 宿主机端口映射
+        labels:
+          app: 'habit-tracking'
+          tier: 'api'
+          environment: 'production'
+
+    # 指标重命名 — 增加可读性
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'habit_tracking_(.+)'
+        target_label: __name__
+        replacement: 'ht_$1'
+
+  # ---------------------------------------------------------
+  # Prometheus 自身健康状态
+  # ---------------------------------------------------------
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
