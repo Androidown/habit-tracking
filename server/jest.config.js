@@ -6,6 +6,9 @@ module.exports = {
   collectCoverageFrom: [
     'src/middleware/**/*.ts',
     'src/config/**/*.ts',
+    'src/models/**/*.ts',
+    'src/routes/**/*.ts',
+    'src/validators/**/*.ts',
     '!src/**/__tests__/**',
   ],
   coverageThreshold: {

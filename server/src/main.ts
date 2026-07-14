@@ -13,6 +13,8 @@ import express from 'express';
 import { initSentry, sentryRequestHandler, sentryErrorHandler, closeSentry } from './middleware/sentry';
 import { apiMetricsMiddleware, metricsHandler } from './middleware/api-metrics';
 import { monitoringConfig } from './config/monitoring';
+import { getDatabase } from './config/database';
+import habitRoutes from './routes/habits';
 
 // ---------------------------------------------------------------------------
 // 初始化 Sentry（必须在创建 Express 应用之前）
@@ -44,7 +46,15 @@ app.use(apiMetricsMiddleware);
 
 app.get('/metrics', metricsHandler);
 
-// ---- 第 3 层：健康检查端点 ------------------------------------------------
+// ---- 初始化数据库 ---------------------------------------------------------
+
+getDatabase();
+
+// ---- 第 3 层：业务路由 ----------------------------------------------------
+
+app.use('/api/v1/habits', habitRoutes);
+
+// ---- 第 4 层：健康检查端点 ------------------------------------------------
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -54,7 +64,7 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// ---- 第 4 层：Sentry 全局错误处理器（必须在路由之后，最后注册） -----------
+// ---- 第 5 层：Sentry 全局错误处理器（必须在路由之后，最后注册） -----------
 
 app.use(sentryErrorHandler);
 
