@@ -50,6 +50,28 @@ func (m *CheckinModel) Create(habitID, userID, checkinDate string) (*Checkin, er
 	}, nil
 }
 
+// FindByHabitAndDate retrieves a single checkin for a habit on a specific date.
+func (m *CheckinModel) FindByHabitAndDate(habitID, userID, date string) (*Checkin, error) {
+	c := &Checkin{}
+	err := m.db.QueryRow(
+		`SELECT id, habit_id, user_id, checkin_date, completed_at, created_at FROM checkins WHERE habit_id = ? AND user_id = ? AND checkin_date = ?`,
+		habitID, userID, date,
+	).Scan(&c.ID, &c.HabitID, &c.UserID, &c.CheckinDate, &c.CompletedAt, &c.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// DeleteByID removes a checkin record by its ID.
+func (m *CheckinModel) DeleteByID(id string) error {
+	_, err := m.db.Exec(`DELETE FROM checkins WHERE id = ?`, id)
+	return err
+}
+
 // FindByUserAndDate retrieves all checkins for a user on a specific date.
 func (m *CheckinModel) FindByUserAndDate(userID, date string) ([]*Checkin, error) {
 	rows, err := m.db.Query(
