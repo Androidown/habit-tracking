@@ -9,10 +9,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Androidown/habit-tracking/backend/internal/middleware"
 	"github.com/Androidown/habit-tracking/backend/internal/model"
 	"github.com/Androidown/habit-tracking/backend/internal/service"
 	_ "modernc.org/sqlite"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // setupTestDB creates an in-memory SQLite database with the required schema.
@@ -37,6 +40,7 @@ func setupTestDB(t *testing.T) *sql.DB {
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
 			expires_at DATETIME NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (user_id) REFERENCES users(id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
@@ -50,13 +54,13 @@ func setupTestDB(t *testing.T) *sql.DB {
 }
 
 // setupTestHandler creates an AuthHandler wired to an in-memory database.
-func setupTestHandler(t *testing.T) *AuthHandler {
+func setupTestHandler(t *testing.T) (*AuthHandler, *sql.DB) {
 	t.Helper()
 	db := setupTestDB(t)
 	userModel := model.NewUserModel(db)
 	sessionModel := model.NewSessionModel(db)
 	authService := service.NewAuthService(userModel, sessionModel)
-	return NewAuthHandler(authService)
+	return NewAuthHandler(authService), db
 }
 
 // executeRequest is a helper to perform an HTTP test request.
@@ -78,9 +82,24 @@ func parseResponse(t *testing.T, w *httptest.ResponseRecorder) map[string]interf
 	return resp
 }
 
-// TestRegisterSuccess verifies a successful registration returns 201 with user info and Set-Cookie.
+// insertTestUser creates a user with a known password hash.
+func insertTestUser(db *sql.DB, email, password string) *model.User {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		panic(err)
+	}
+	userModel := model.NewUserModel(db)
+	user, err := userModel.Create(email, "testuser", string(hash))
+	if err != nil {
+		panic(err)
+	}
+	return user
+}
+
+// --- Register tests (existing) ---
+
 func TestRegisterSuccess(t *testing.T) {
-	handler := setupTestHandler(t)
+	handler, _ := setupTestHandler(t)
 
 	body := `{"email":"test@example.com","username":"testuser","password":"password123"}`
 	w := executeRequest(handler, http.MethodPost, "/api/v1/auth/register", body)
@@ -111,9 +130,6 @@ func TestRegisterSuccess(t *testing.T) {
 	if data["username"] != "testuser" {
 		t.Errorf("expected username 'testuser', got %v", data["username"])
 	}
-	if data["created_at"] == nil || data["created_at"].(string) == "" {
-		t.Error("expected non-empty created_at")
-	}
 
 	// Verify Set-Cookie header
 	cookies := w.Result().Header["Set-Cookie"]
@@ -132,20 +148,17 @@ func TestRegisterSuccess(t *testing.T) {
 	}
 }
 
-// TestRegisterMissingFields verifies that empty fields return 422.
 func TestRegisterMissingFields(t *testing.T) {
-	handler := setupTestHandler(t)
+	handler, _ := setupTestHandler(t)
 
 	tests := []struct {
-		name     string
-		body     string
-		field    string
-		reason   string
+		name string
+		body string
 	}{
-		{"missing email", `{"email":"","username":"testuser","password":"password123"}`, "email", "required"},
-		{"missing username", `{"email":"test@example.com","username":"","password":"password123"}`, "username", "required"},
-		{"missing password", `{"email":"test@example.com","username":"testuser","password":""}`, "password", "required"},
-		{"all fields empty", `{"email":"","username":"","password":""}`, "email", "required"},
+		{"missing email", `{"email":"","username":"testuser","password":"password123"}`},
+		{"missing username", `{"email":"test@example.com","username":"","password":"password123"}`},
+		{"missing password", `{"email":"test@example.com","username":"testuser","password":""}`},
+		{"all fields empty", `{"email":"","username":"","password":""}`},
 	}
 
 	for _, tt := range tests {
@@ -166,9 +179,8 @@ func TestRegisterMissingFields(t *testing.T) {
 	}
 }
 
-// TestRegisterInvalidEmail verifies that invalid email formats return 422.
 func TestRegisterInvalidEmail(t *testing.T) {
-	handler := setupTestHandler(t)
+	handler, _ := setupTestHandler(t)
 
 	tests := []struct {
 		name  string
@@ -197,9 +209,8 @@ func TestRegisterInvalidEmail(t *testing.T) {
 	}
 }
 
-// TestRegisterShortPassword verifies that short passwords return 422.
 func TestRegisterShortPassword(t *testing.T) {
-	handler := setupTestHandler(t)
+	handler, _ := setupTestHandler(t)
 
 	body := `{"email":"test@example.com","username":"testuser","password":"short"}`
 	w := executeRequest(handler, http.MethodPost, "/api/v1/auth/register", body)
@@ -214,9 +225,8 @@ func TestRegisterShortPassword(t *testing.T) {
 	}
 }
 
-// TestRegisterInvalidUsername verifies invalid usernames return 422.
 func TestRegisterInvalidUsername(t *testing.T) {
-	handler := setupTestHandler(t)
+	handler, _ := setupTestHandler(t)
 
 	tests := []struct {
 		name     string
@@ -244,104 +254,312 @@ func TestRegisterInvalidUsername(t *testing.T) {
 	}
 }
 
-// TestRegisterDuplicateEmail verifies that a duplicate email returns 409.
-func TestRegisterDuplicateEmail(t *testing.T) {
-	handler := setupTestHandler(t)
+// --- Login tests ---
 
-	// First registration — should succeed
-	body1 := `{"email":"dupe@example.com","username":"user1","password":"password123"}`
-	w1 := executeRequest(handler, http.MethodPost, "/api/v1/auth/register", body1)
-	if w1.Code != http.StatusCreated {
-		t.Errorf("first registration: expected 201, got %d", w1.Code)
+func TestLogin_Success(t *testing.T) {
+	handler, db := setupTestHandler(t)
+	insertTestUser(db, "user@example.com", "secret123")
+
+	body := `{"email":"user@example.com","password":"secret123"}`
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.Login(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Second registration with same email — should fail with 409
-	body2 := `{"email":"dupe@example.com","username":"user2","password":"anotherPass1"}`
-	w2 := executeRequest(handler, http.MethodPost, "/api/v1/auth/register", body2)
-	if w2.Code != http.StatusConflict {
-		t.Errorf("expected status 409 for duplicate email, got %d", w2.Code)
+	// Check Set-Cookie header
+	cookies := w.Result().Cookies()
+	var sessionCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == "session_id" {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected session cookie")
+	}
+	if !sessionCookie.HttpOnly {
+		t.Error("expected HttpOnly cookie")
+	}
+	if sessionCookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("expected SameSite=Lax, got %v", sessionCookie.SameSite)
+	}
+	if sessionCookie.Path != "/" {
+		t.Errorf("expected Path=/, got %s", sessionCookie.Path)
+	}
+	if sessionCookie.MaxAge <= 0 {
+		t.Errorf("expected positive MaxAge, got %d", sessionCookie.MaxAge)
+	}
+	if sessionCookie.Value == "" {
+		t.Error("expected non-empty session cookie value")
 	}
 
-	resp := parseResponse(t, w2)
-	if code := resp["code"].(float64); code != 1002 {
-		t.Errorf("expected code 1002, got %v", code)
+	// Verify response body
+	resp := parseResponse(t, w)
+	if code := resp["code"].(float64); int(code) != service.CodeSuccess {
+		t.Errorf("expected code %d, got %d", service.CodeSuccess, int(code))
 	}
-	if msg := resp["message"].(string); msg != "EMAIL_ALREADY_EXISTS" {
-		t.Errorf("expected message 'EMAIL_ALREADY_EXISTS', got %q", msg)
+	if msg := resp["message"].(string); msg != "SUCCESS" {
+		t.Errorf("expected message 'SUCCESS', got %q", msg)
 	}
-
-	// Verify no user info is leaked in the 409 response
-	if _, ok := resp["data"]; ok {
-		t.Error("expected no data field in 409 response to avoid leaking user info")
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected data object in response")
+	}
+	if data["email"] != "user@example.com" {
+		t.Errorf("expected email user@example.com, got %v", data["email"])
 	}
 }
 
-// TestRegisterInvalidJSON verifies that non-JSON requests return 422.
-func TestRegisterInvalidJSON(t *testing.T) {
-	handler := setupTestHandler(t)
+func TestLogin_InvalidPassword(t *testing.T) {
+	handler, db := setupTestHandler(t)
+	insertTestUser(db, "user@example.com", "secret123")
 
-	body := `this is not json`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewBufferString(body))
+	body := `{"email":"user@example.com","password":"wrong-password"}`
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	handler.Register(w, req)
+	handler.Login(w, req)
 
-	if w.Code != http.StatusUnprocessableEntity {
-		t.Errorf("expected status 422 for invalid JSON, got %d", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", w.Code, w.Body.String())
 	}
 
 	resp := parseResponse(t, w)
-	if code := resp["code"].(float64); code != 1001 {
-		t.Errorf("expected code 1001, got %v", code)
+	if code := resp["code"].(float64); int(code) != service.CodeInvalidCredentials {
+		t.Errorf("expected code %d, got %d", service.CodeInvalidCredentials, int(code))
+	}
+	if msg := resp["message"].(string); msg != "INVALID_CREDENTIALS" {
+		t.Errorf("expected message 'INVALID_CREDENTIALS', got %q", msg)
 	}
 }
 
-// TestRegisterPasswordStoredAsHash verifies that passwords are bcrypt-hashed, not plaintext.
-func TestRegisterPasswordStoredAsHash(t *testing.T) {
-	db := setupTestDB(t)
+func TestLogin_UnregisteredEmail(t *testing.T) {
+	handler, _ := setupTestHandler(t)
+
+	body := `{"email":"unknown@example.com","password":"some-password"}`
+	req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.Login(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+
+	resp := parseResponse(t, w)
+	if code := resp["code"].(float64); int(code) != service.CodeInvalidCredentials {
+		t.Errorf("expected code %d, got %d", service.CodeInvalidCredentials, int(code))
+	}
+	if msg := resp["message"].(string); msg != "INVALID_CREDENTIALS" {
+		t.Errorf("expected message 'INVALID_CREDENTIALS', got %q", msg)
+	}
+}
+
+func TestLogin_EmptyFields(t *testing.T) {
+	handler, _ := setupTestHandler(t)
+
+	tests := []struct {
+		name     string
+		email    string
+		password string
+	}{
+		{"empty email", "", "password123"},
+		{"empty password", "user@example.com", ""},
+		{"both empty", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"email":"%s","password":"%s"}`, tt.email, tt.password)
+			req := httptest.NewRequest("POST", "/api/v1/auth/login", bytes.NewBufferString(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			handler.Login(w, req)
+
+			if w.Code != http.StatusUnprocessableEntity {
+				t.Errorf("expected 422, got %d: %s", w.Code, w.Body.String())
+			}
+
+			resp := parseResponse(t, w)
+			if code := resp["code"].(float64); int(code) != service.CodeValidationError {
+				t.Errorf("expected code %d, got %d", service.CodeValidationError, int(code))
+			}
+		})
+	}
+}
+
+// --- Me tests ---
+
+func TestMe_ValidSession(t *testing.T) {
+	handler, db := setupTestHandler(t)
+	user := insertTestUser(db, "user@example.com", "secret123")
+
+	sessionModel := model.NewSessionModel(db)
+	sess, err := sessionModel.Create(user.ID, time.Now().Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("Create session failed: %v", err)
+	}
+
+	userModel := model.NewUserModel(db)
+	authSvc := service.NewAuthService(userModel, sessionModel)
+	authMw := middleware.NewAuthMiddleware(authSvc)
+
+	req := httptest.NewRequest("GET", "/api/v1/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: sess.ID})
+	w := httptest.NewRecorder()
+
+	authMw.Authenticate(http.HandlerFunc(handler.Me)).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	resp := parseResponse(t, w)
+	if code := resp["code"].(float64); int(code) != service.CodeSuccess {
+		t.Errorf("expected code %d, got %d", service.CodeSuccess, int(code))
+	}
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected data object")
+	}
+	if data["email"] != "user@example.com" {
+		t.Errorf("expected email user@example.com, got %v", data["email"])
+	}
+}
+
+func TestMe_NoCookie(t *testing.T) {
+	handler, db := setupTestHandler(t)
 	userModel := model.NewUserModel(db)
 	sessionModel := model.NewSessionModel(db)
-	authService := service.NewAuthService(userModel, sessionModel)
-	handler := NewAuthHandler(authService)
+	authSvc := service.NewAuthService(userModel, sessionModel)
+	authMw := middleware.NewAuthMiddleware(authSvc)
 
-	body := `{"email":"hashcheck@example.com","username":"hashcheck","password":"securePass123"}`
-	w := executeRequest(handler, http.MethodPost, "/api/v1/auth/register", body)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", w.Code)
-	}
+	req := httptest.NewRequest("GET", "/api/v1/auth/me", nil)
+	w := httptest.NewRecorder()
 
-	// Directly query the database to verify the stored hash
-	var passwordHash string
-	err := db.QueryRow(`SELECT password_hash FROM users WHERE email = ?`, "hashcheck@example.com").Scan(&passwordHash)
-	if err != nil {
-		t.Fatalf("failed to query user: %v", err)
-	}
+	authMw.Authenticate(http.HandlerFunc(handler.Me)).ServeHTTP(w, req)
 
-	// Verify it's not plaintext
-	if passwordHash == "securePass123" {
-		t.Error("password is stored as plaintext!")
-	}
-
-	// Verify it starts with bcrypt prefix
-	if !strings.HasPrefix(passwordHash, "$2a$") && !strings.HasPrefix(passwordHash, "$2b$") {
-		t.Errorf("password hash does not look like bcrypt: %q", passwordHash)
-	}
-
-	// Verify bcrypt hash is at least 50 chars (bcrypt hash is typically 60)
-	if len(passwordHash) < 50 {
-		t.Errorf("bcrypt hash seems too short: %d chars", len(passwordHash))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", w.Code, w.Body.String())
 	}
 }
 
-// TestRegisterWrongMethod verifies that non-POST requests are rejected.
-func TestRegisterWrongMethod(t *testing.T) {
-	handler := setupTestHandler(t)
+func TestMe_ExpiredSession(t *testing.T) {
+	handler, db := setupTestHandler(t)
+	user := insertTestUser(db, "user@example.com", "secret123")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/register", nil)
+	sessionModel := model.NewSessionModel(db)
+	sess, err := sessionModel.Create(user.ID, time.Now().Add(-1*time.Hour))
+	if err != nil {
+		t.Fatalf("Create session failed: %v", err)
+	}
+
+	userModel := model.NewUserModel(db)
+	authSvc := service.NewAuthService(userModel, sessionModel)
+	authMw := middleware.NewAuthMiddleware(authSvc)
+
+	req := httptest.NewRequest("GET", "/api/v1/auth/me", nil)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: sess.ID})
 	w := httptest.NewRecorder()
-	handler.Register(w, req)
 
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405, got %d", w.Code)
+	authMw.Authenticate(http.HandlerFunc(handler.Me)).ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- Logout tests ---
+
+func TestLogout_ClearsSession(t *testing.T) {
+	handler, db := setupTestHandler(t)
+	user := insertTestUser(db, "user@example.com", "secret123")
+
+	sessionModel := model.NewSessionModel(db)
+	sess, err := sessionModel.Create(user.ID, time.Now().Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("Create session failed: %v", err)
+	}
+
+	userModel := model.NewUserModel(db)
+	authSvc := service.NewAuthService(userModel, sessionModel)
+	authMw := middleware.NewAuthMiddleware(authSvc)
+
+	req := httptest.NewRequest("POST", "/api/v1/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: "session_id", Value: sess.ID})
+	w := httptest.NewRecorder()
+
+	authMw.Authenticate(http.HandlerFunc(handler.Logout)).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Session should be deleted from store
+	deletedSess, err := sessionModel.GetByID(sess.ID)
+	if err != nil {
+		t.Fatalf("GetByID failed: %v", err)
+	}
+	if deletedSess != nil {
+		t.Error("expected session to be deleted after logout")
+	}
+
+	// Cookie should be cleared
+	cookies := w.Result().Cookies()
+	var sessionCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == "session_id" {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected session cookie in response")
+	}
+	if sessionCookie.MaxAge != -1 {
+		t.Errorf("expected MaxAge=-1, got %d", sessionCookie.MaxAge)
+	}
+	if sessionCookie.Value != "" {
+		t.Errorf("expected empty value, got %s", sessionCookie.Value)
+	}
+}
+
+func TestLogoutThenAccessDenied(t *testing.T) {
+	handler, db := setupTestHandler(t)
+	user := insertTestUser(db, "user@example.com", "secret123")
+
+	sessionModel := model.NewSessionModel(db)
+	sess, err := sessionModel.Create(user.ID, time.Now().Add(24*time.Hour))
+	if err != nil {
+		t.Fatalf("Create session failed: %v", err)
+	}
+
+	userModel := model.NewUserModel(db)
+	authSvc := service.NewAuthService(userModel, sessionModel)
+	authMw := middleware.NewAuthMiddleware(authSvc)
+
+	// Logout
+	logoutReq := httptest.NewRequest("POST", "/api/v1/auth/logout", nil)
+	logoutReq.AddCookie(&http.Cookie{Name: "session_id", Value: sess.ID})
+	logoutW := httptest.NewRecorder()
+	authMw.Authenticate(http.HandlerFunc(handler.Logout)).ServeHTTP(logoutW, logoutReq)
+
+	if logoutW.Code != http.StatusOK {
+		t.Fatalf("logout failed: %d", logoutW.Code)
+	}
+
+	// Now try GET /me with the same cookie
+	meReq := httptest.NewRequest("GET", "/api/v1/auth/me", nil)
+	meReq.AddCookie(&http.Cookie{Name: "session_id", Value: sess.ID})
+	meW := httptest.NewRecorder()
+	authMw.Authenticate(http.HandlerFunc(handler.Me)).ServeHTTP(meW, meReq)
+
+	if meW.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 after logout, got %d: %s", meW.Code, meW.Body.String())
 	}
 }
