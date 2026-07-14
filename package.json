@@ -1,0 +1,14 @@
+{
+  "name": "habit-tracking-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "server"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}
