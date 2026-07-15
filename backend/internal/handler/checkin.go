@@ -1,238 +1,161 @@
 package handler
 
 import (
+	"encoding/json"
+	"log"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
-	"github.com/Androidown/habit-tracking/backend/internal/middleware"
 	"github.com/Androidown/habit-tracking/backend/internal/service"
 )
-
-// datePattern validates YYYY-MM-DD format.
-var datePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 // CheckinHandler handles check-in HTTP requests.
 type CheckinHandler struct {
 	checkinService *service.CheckinService
-	authMiddleware *middleware.AuthMiddleware
 }
 
 // NewCheckinHandler creates a new CheckinHandler.
-func NewCheckinHandler(checkinService *service.CheckinService, authMiddleware *middleware.AuthMiddleware) *CheckinHandler {
-	return &CheckinHandler{
-		checkinService: checkinService,
-		authMiddleware: authMiddleware,
-	}
+func NewCheckinHandler(checkinService *service.CheckinService) *CheckinHandler {
+	return &CheckinHandler{checkinService: checkinService}
 }
 
-// GetDailyCheckins handles GET /api/v1/checkins/daily.
-func (h *CheckinHandler) GetDailyCheckins(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{
-			"code":    9999,
-			"message": "METHOD_NOT_ALLOWED",
+// habitCheckinsResponse is the standard response for the checkins query endpoint.
+type habitCheckinsResponse struct {
+	Code    int                         `json:"code"`
+	Message string                      `json:"message"`
+	Data    *service.HabitCheckinsOutput `json:"data,omitempty"`
+}
+
+// errResponse is a minimal error response.
+type errResponse struct {
+	Code    int         `json:"code"`
+	Message string      `json:"message"`
+	Data    interface{} `json:"data,omitempty"`
+}
+
+// GetCheckins handles GET /api/v1/habits/{habit_id}/checkins.
+//
+// Query parameters:
+//   - start_date (required): YYYY-MM-DD
+//   - end_date (required): YYYY-MM-DD
+//   - timezone (optional): IANA timezone name (reserved for future use)
+func (h *CheckinHandler) GetCheckins(w http.ResponseWriter, r *http.Request) {
+	// Extract habit_id from path: /api/v1/habits/{habit_id}/checkins
+	habitID := extractHabitID(r.URL.Path)
+	if habitID == "" {
+		writeCheckinError(w, http.StatusBadRequest, 1001, "VALIDATION_ERROR", []interface{}{
+			map[string]string{"field": "habit_id", "reason": "required"},
 		})
 		return
 	}
 
-	// Extract authenticated user
-	userID := middleware.GetUserID(r)
+	// Parse query parameters
+	startDate := r.URL.Query().Get("start_date")
+	endDate := r.URL.Query().Get("end_date")
+
+	// Validate start_date
+	if startDate == "" {
+		writeCheckinError(w, http.StatusBadRequest, 1001, "VALIDATION_ERROR", []interface{}{
+			map[string]string{"field": "start_date", "reason": "required"},
+		})
+		return
+	}
+	if _, err := time.Parse("2006-01-02", startDate); err != nil {
+		writeCheckinError(w, http.StatusBadRequest, 1001, "VALIDATION_ERROR", []interface{}{
+			map[string]string{"field": "start_date", "reason": "invalid date format, expected YYYY-MM-DD"},
+		})
+		return
+	}
+
+	// Validate end_date
+	if endDate == "" {
+		writeCheckinError(w, http.StatusBadRequest, 1001, "VALIDATION_ERROR", []interface{}{
+			map[string]string{"field": "end_date", "reason": "required"},
+		})
+		return
+	}
+	if _, err := time.Parse("2006-01-02", endDate); err != nil {
+		writeCheckinError(w, http.StatusBadRequest, 1001, "VALIDATION_ERROR", []interface{}{
+			map[string]string{"field": "end_date", "reason": "invalid date format, expected YYYY-MM-DD"},
+		})
+		return
+	}
+
+	// Get user ID from middleware-set header
+	userID := r.Header.Get("X-User-ID")
 	if userID == "" {
-		// This shouldn't happen if middleware is applied, but handle gracefully
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-			"code":    401,
-			"message": "AUTH_REQUIRED",
-		})
-		return
-	}
-
-	// Parse date query parameter
-	dateStr := r.URL.Query().Get("date")
-
-	// Empty date returns empty list (per spec)
-	if dateStr == "" {
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"code":    0,
-			"message": "ok",
-			"data": map[string]interface{}{
-				"date":   "",
-				"habits": []interface{}{},
-				"stats": map[string]interface{}{
-					"required":     0,
-					"completed":    0,
-					"total_habits": 0,
-				},
-			},
-		})
-		return
-	}
-
-	// Validate date format
-	if !datePattern.MatchString(dateStr) {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"code":    1001,
-			"message": "VALIDATION_ERROR",
-			"data": []middleware.ValidationError{
-				{Field: "date", Reason: "invalid date format, expected YYYY-MM-DD"},
-			},
-		})
-		return
-	}
-
-	// Validate it's a real date
-	if _, err := time.Parse("2006-01-02", dateStr); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"code":    1001,
-			"message": "VALIDATION_ERROR",
-			"data": []middleware.ValidationError{
-				{Field: "date", Reason: "invalid date, not a real calendar date"},
-			},
-		})
+		writeCheckinError(w, http.StatusUnauthorized, 9999, "UNAUTHORIZED", nil)
 		return
 	}
 
 	// Call service
-	result, err := h.checkinService.GetDailyCheckins(userID, dateStr)
+	output, err := h.checkinService.GetHabitCheckins(habitID, userID, startDate, endDate)
 	if err != nil {
 		se := service.AsServiceError(err)
 		if se == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-				"code":    9999,
-				"message": "INTERNAL_ERROR",
-			})
+			writeCheckinError(w, http.StatusInternalServerError, 9999, "INTERNAL_ERROR", nil)
 			return
 		}
 
 		switch se.Code {
 		case 1001: // VALIDATION_ERROR
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"code":    se.Code,
-				"message": se.Message,
-				"data":    se.Data,
-			})
+			writeCheckinError(w, http.StatusBadRequest, se.Code, se.Message, se.Data)
+		case 3001: // HABIT_NOT_FOUND
+			writeCheckinError(w, http.StatusNotFound, se.Code, se.Message, nil)
+		case 3002: // RANGE_TOO_LARGE
+			writeCheckinError(w, http.StatusBadRequest, se.Code, se.Message, nil)
+		case 3003: // FORBIDDEN
+			writeCheckinError(w, http.StatusForbidden, se.Code, se.Message, nil)
 		default:
-			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-				"code":    9999,
-				"message": "INTERNAL_ERROR",
-			})
+			writeCheckinError(w, http.StatusInternalServerError, 9999, "INTERNAL_ERROR", nil)
 		}
 		return
 	}
 
-	// Return success response
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"code":    0,
-		"message": "ok",
-		"data":    result,
+	// Success response
+	writeCheckinJSON(w, http.StatusOK, habitCheckinsResponse{
+		Code:    0,
+		Message: "ok",
+		Data:    output,
 	})
 }
 
-// DeleteCheckin handles DELETE /api/v1/habits/{habit_id}/checkins/{date}.
-func (h *CheckinHandler) DeleteCheckin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{
-			"code":    9999,
-			"message": "METHOD_NOT_ALLOWED",
-		})
-		return
+// writeCheckinJSON serializes a success response as JSON.
+func writeCheckinJSON(w http.ResponseWriter, status int, payload interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		log.Printf("failed to encode JSON response: %v", err)
 	}
+}
 
-	// Extract authenticated user
-	userID := middleware.GetUserID(r)
-	if userID == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
-			"code":    401,
-			"message": "AUTH_REQUIRED",
-		})
-		return
+// writeCheckinError serializes an error response as JSON.
+func writeCheckinError(w http.ResponseWriter, status int, code int, message string, data interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	payload := errResponse{
+		Code:    code,
+		Message: message,
+		Data:    data,
 	}
-
-	// Extract path parameters: /api/v1/habits/{habit_id}/checkins/{date}
-	// Parse using path prefix removal
-	habitID, dateStr := parseDeletePath(r.URL.Path)
-	if habitID == "" || dateStr == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"code":    1001,
-			"message": "VALIDATION_ERROR",
-			"data": []middleware.ValidationError{
-				{Field: "path", Reason: "invalid path format, expected /api/v1/habits/{habit_id}/checkins/{date}"},
-			},
-		})
-		return
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		log.Printf("failed to encode JSON error response: %v", err)
 	}
+}
 
-	// Call service
-	result, err := h.checkinService.DeleteCheckin(habitID, userID, dateStr)
-	if err != nil {
-		se := service.AsServiceError(err)
-		if se == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-				"code":    9999,
-				"message": "INTERNAL_ERROR",
-			})
-			return
+// extractHabitID parses the habit ID from the URL path.
+// Expected format: /api/v1/habits/{habit_id}/checkins[/...]
+func extractHabitID(path string) string {
+	// Trim trailing slash
+	path = strings.TrimSuffix(path, "/")
+	parts := strings.Split(path, "/")
+	// parts should be ["", "api", "v1", "habits", "{habit_id}", "checkins", ...]
+	// Index 4 is the habit_id
+	for i, p := range parts {
+		if p == "habits" && i+2 < len(parts) && parts[i+2] == "checkins" {
+			return parts[i+1]
 		}
-
-		switch se.Code {
-		case 1001: // VALIDATION_ERROR
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"code":    se.Code,
-				"message": se.Message,
-				"data":    se.Data,
-			})
-		case 1003: // FORBIDDEN
-			writeJSON(w, http.StatusForbidden, map[string]interface{}{
-				"code":    se.Code,
-				"message": se.Message,
-				"data":    se.Data,
-			})
-		case 1004: // CHECKIN_NOT_FOUND
-			writeJSON(w, http.StatusNotFound, map[string]interface{}{
-				"code":    1004,
-				"message": "CHECKIN_NOT_FOUND",
-			})
-		default:
-			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-				"code":    9999,
-				"message": "INTERNAL_ERROR",
-			})
-		}
-		return
 	}
-
-	// Return success response
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"code":    0,
-		"message": "ok",
-		"data":    result,
-	})
+	return ""
 }
-
-// parseDeletePath extracts habit_id and date from a DELETE checkin path.
-// Expected format: /api/v1/habits/{habit_id}/checkins/{date}
-func parseDeletePath(path string) (string, string) {
-	const prefix = "/api/v1/habits/"
-	if len(path) <= len(prefix) {
-		return "", ""
-	}
-	rest := path[len(prefix):]
-
-	// rest should be: {habit_id}/checkins/{date}
-	parts := strings.SplitN(rest, "/checkins/", 2)
-	if len(parts) != 2 {
-		return "", ""
-	}
-	if parts[0] == "" || parts[1] == "" {
-		return "", ""
-	}
-	return parts[0], parts[1]
-}
-
-// RegisterRoutes registers check-in related routes on the given mux.
-func (h *CheckinHandler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/v1/checkins/daily", h.authMiddleware.Authenticate(h.GetDailyCheckins))
-	mux.HandleFunc("/api/v1/habits/", h.authMiddleware.Authenticate(h.DeleteCheckin))
-}
-

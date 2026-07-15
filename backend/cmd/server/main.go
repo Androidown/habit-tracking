@@ -30,12 +30,23 @@ func main() {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
 
-	// Wire dependencies
+	// Models
 	userModel := model.NewUserModel(db)
 	sessionModel := model.NewSessionModel(db)
+	habitModel := model.NewHabitModel(db)
+	checkinModel := model.NewCheckinModel(db)
+
+	// Services
 	authService := service.NewAuthService(userModel, sessionModel)
+	scheduleResolver := service.NewScheduleResolver()
+	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
+
+	// Handlers
 	authHandler := handler.NewAuthHandler(authService)
-	authMiddleware := middleware.NewAuthMiddleware(authService)
+	checkinHandler := handler.NewCheckinHandler(checkinService)
+
+	// Middleware
+	sessionMiddleware := middleware.NewSessionMiddleware(db)
 
 	// Start periodic expired session cleanup
 	go func() {
@@ -53,15 +64,7 @@ func main() {
 
 	// Auth routes
 	mux.HandleFunc("/api/v1/auth/register", authHandler.Register)
-	mux.HandleFunc("/api/v1/auth/login", authHandler.Login)
-	mux.HandleFunc("/api/v1/auth/logout", authMiddleware.Authenticate(http.HandlerFunc(authHandler.Logout)).ServeHTTP)
-	mux.HandleFunc("/api/v1/auth/me", authMiddleware.Authenticate(http.HandlerFunc(authHandler.Me)).ServeHTTP)
-
-	// Health check
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status":"ok"}`))
-	})
+	mux.Handle("GET /api/v1/habits/{habit_id}/checkins", sessionMiddleware.RequireAuth(checkinHandler.GetCheckins))
 
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
@@ -94,8 +97,28 @@ func runMigrations(db *sql.DB) error {
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (user_id) REFERENCES users(id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS habits (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			schedule_expression TEXT NOT NULL DEFAULT 'daily',
+			deleted_at DATETIME,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (user_id) REFERENCES users(id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS checkins (
+			id TEXT PRIMARY KEY,
+			habit_id TEXT NOT NULL,
+			checkin_date DATE NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (habit_id) REFERENCES habits(id)
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_checkins_habit_date ON checkins(habit_id, checkin_date)`,
 	}
 
 	for _, m := range migrations {

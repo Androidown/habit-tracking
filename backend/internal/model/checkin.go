@@ -7,13 +7,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// Checkin represents a daily check-in record in the database.
+// Checkin represents a single check-in record.
 type Checkin struct {
 	ID          string    `json:"id"`
 	HabitID     string    `json:"habit_id"`
-	UserID      string    `json:"user_id"`
 	CheckinDate string    `json:"checkin_date"` // YYYY-MM-DD
-	CompletedAt time.Time `json:"completed_at"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
@@ -28,13 +26,13 @@ func NewCheckinModel(db *sql.DB) *CheckinModel {
 }
 
 // Create inserts a new checkin record.
-func (m *CheckinModel) Create(habitID, userID, checkinDate string) (*Checkin, error) {
+func (m *CheckinModel) Create(habitID, checkinDate string) (*Checkin, error) {
 	id := uuid.New().String()
 	now := time.Now().UTC()
 
 	_, err := m.db.Exec(
-		`INSERT INTO checkins (id, habit_id, user_id, checkin_date, completed_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		id, habitID, userID, checkinDate, now, now,
+		`INSERT INTO checkins (id, habit_id, checkin_date, created_at) VALUES (?, ?, ?, ?)`,
+		id, habitID, checkinDate, now,
 	)
 	if err != nil {
 		return nil, err
@@ -43,40 +41,20 @@ func (m *CheckinModel) Create(habitID, userID, checkinDate string) (*Checkin, er
 	return &Checkin{
 		ID:          id,
 		HabitID:     habitID,
-		UserID:      userID,
 		CheckinDate: checkinDate,
-		CompletedAt: now,
 		CreatedAt:   now,
 	}, nil
 }
 
-// FindByHabitAndDate retrieves a single checkin for a habit on a specific date.
-func (m *CheckinModel) FindByHabitAndDate(habitID, userID, date string) (*Checkin, error) {
-	c := &Checkin{}
-	err := m.db.QueryRow(
-		`SELECT id, habit_id, user_id, checkin_date, completed_at, created_at FROM checkins WHERE habit_id = ? AND user_id = ? AND checkin_date = ?`,
-		habitID, userID, date,
-	).Scan(&c.ID, &c.HabitID, &c.UserID, &c.CheckinDate, &c.CompletedAt, &c.CreatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
-// DeleteByID removes a checkin record by its ID.
-func (m *CheckinModel) DeleteByID(id string) error {
-	_, err := m.db.Exec(`DELETE FROM checkins WHERE id = ?`, id)
-	return err
-}
-
-// FindByUserAndDate retrieves all checkins for a user on a specific date.
-func (m *CheckinModel) FindByUserAndDate(userID, date string) ([]*Checkin, error) {
+// FindByHabitAndDateRange returns checkins for a habit within a date range, ordered by date.
+// Uses date() to normalize SQLite DATE values (which may include time components).
+func (m *CheckinModel) FindByHabitAndDateRange(habitID, startDate, endDate string) ([]*Checkin, error) {
 	rows, err := m.db.Query(
-		`SELECT id, habit_id, user_id, checkin_date, completed_at, created_at FROM checkins WHERE user_id = ? AND checkin_date = ?`,
-		userID, date,
+		`SELECT id, habit_id, checkin_date, created_at
+		 FROM checkins
+		 WHERE habit_id = ? AND date(checkin_date) >= date(?) AND date(checkin_date) <= date(?)
+		 ORDER BY checkin_date ASC`,
+		habitID, startDate, endDate,
 	)
 	if err != nil {
 		return nil, err
@@ -86,17 +64,35 @@ func (m *CheckinModel) FindByUserAndDate(userID, date string) ([]*Checkin, error
 	var checkins []*Checkin
 	for rows.Next() {
 		c := &Checkin{}
-		if err := rows.Scan(&c.ID, &c.HabitID, &c.UserID, &c.CheckinDate, &c.CompletedAt, &c.CreatedAt); err != nil {
+		// Scan checkin_date as a raw value and normalize to YYYY-MM-DD
+		var rawDate interface{}
+		if err := rows.Scan(&c.ID, &c.HabitID, &rawDate, &c.CreatedAt); err != nil {
 			return nil, err
 		}
+		c.CheckinDate = normalizeDate(rawDate)
 		checkins = append(checkins, c)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
+	return checkins, rows.Err()
+}
 
-	if checkins == nil {
-		checkins = []*Checkin{}
+// normalizeDate converts a DATE value from SQLite to YYYY-MM-DD string.
+// modernc.org/sqlite may return DATE/TEXT values as time.Time or string.
+func normalizeDate(v interface{}) string {
+	switch val := v.(type) {
+	case time.Time:
+		return val.Format("2006-01-02")
+	case string:
+		if len(val) > 10 {
+			return val[:10]
+		}
+		return val
+	case []byte:
+		s := string(val)
+		if len(s) > 10 {
+			return s[:10]
+		}
+		return s
+	default:
+		return ""
 	}
-	return checkins, nil
 }

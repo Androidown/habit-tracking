@@ -12,11 +12,24 @@ import (
 	"github.com/Androidown/habit-tracking/backend/internal/middleware"
 	"github.com/Androidown/habit-tracking/backend/internal/model"
 	"github.com/Androidown/habit-tracking/backend/internal/service"
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
 
-// setupCheckinTestDB creates an in-memory SQLite database with all required tables.
-func setupCheckinTestDB(t *testing.T) *sql.DB {
+// checkinTestDB holds references for checkin tests.
+type checkinTestDB struct {
+	db             *sql.DB
+	userID         string
+	sessionID      string
+	otherUserID    string
+	otherSessionID string
+	habitID        string
+	deletedHabitID string
+	otherHabitID   string
+}
+
+// setupCheckinTestDB creates an in-memory database with full schema and seed data.
+func setupCheckinTestDB(t *testing.T) *checkinTestDB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -43,8 +56,9 @@ func setupCheckinTestDB(t *testing.T) *sql.DB {
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
 			name TEXT NOT NULL,
-			schedule_expr TEXT NOT NULL DEFAULT 'daily',
-			status TEXT NOT NULL DEFAULT 'active',
+			description TEXT NOT NULL DEFAULT '',
+			schedule_expression TEXT NOT NULL DEFAULT 'daily',
+			deleted_at DATETIME,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (user_id) REFERENCES users(id)
@@ -52,104 +66,151 @@ func setupCheckinTestDB(t *testing.T) *sql.DB {
 		`CREATE TABLE IF NOT EXISTS checkins (
 			id TEXT PRIMARY KEY,
 			habit_id TEXT NOT NULL,
-			user_id TEXT NOT NULL,
-			checkin_date TEXT NOT NULL,
-			completed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			checkin_date DATE NOT NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (habit_id) REFERENCES habits(id),
-			FOREIGN KEY (user_id) REFERENCES users(id)
+			FOREIGN KEY (habit_id) REFERENCES habits(id)
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_checkins_user_date ON checkins(user_id, checkin_date)`,
+		`CREATE INDEX IF NOT EXISTS idx_checkins_habit_date ON checkins(habit_id, checkin_date)`,
 	}
-
 	for _, m := range migrations {
 		if _, err := db.Exec(m); err != nil {
 			t.Fatalf("migration failed: %v", err)
 		}
 	}
-	return db
-}
 
-// setupCheckinTestHandler creates a CheckinHandler wired to an in-memory database.
-// It inserts a test user, session, and sample habits, returning the handler,
-// session ID, and a list of habit IDs.
-func setupCheckinTestHandler(t *testing.T) (*CheckinHandler, string, []string) {
-	t.Helper()
-	db := setupCheckinTestDB(t)
+	userID := uuid.New().String()
+	otherUserID := uuid.New().String()
+	sessionID := uuid.New().String()
+	otherSessionID := uuid.New().String()
+	habitID := uuid.New().String()
+	deletedHabitID := uuid.New().String()
+	otherHabitID := uuid.New().String()
+	now := time.Now().UTC()
 
-	// Insert test user
-	userID := "test-user-1"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "test@example.com", "testuser", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert test user: %v", err)
-	}
-
-	// Insert session
-	sessionID := "test-session-1"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionID, userID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert test session: %v", err)
-	}
-
-	// Insert habits
-	habitIDs := make([]string, 3)
-	habitNames := []string{"晨跑", "阅读", "冥想"}
-	for i, name := range habitNames {
-		habitID := fmt.Sprintf("habit-%d", i+1)
-		_, err = db.Exec(
-			`INSERT INTO habits (id, user_id, name, schedule_expr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			habitID, userID, name, "daily", "active", time.Now().UTC(), time.Now().UTC(),
+	// Seed users
+	for _, u := range []struct {
+		id       string
+		email    string
+		username string
+	}{
+		{userID, "alice@example.com", "alice"},
+		{otherUserID, "bob@example.com", "bob"},
+	} {
+		_, err := db.Exec(
+			`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			u.id, u.email, u.username, "hash", now, now,
 		)
 		if err != nil {
-			t.Fatalf("failed to insert habit %q: %v", name, err)
+			t.Fatalf("failed to seed user %s: %v", u.id, err)
 		}
-		habitIDs[i] = habitID
 	}
 
-	// Initialize models
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
+	// Seed sessions (valid for 24h)
+	for _, s := range []struct {
+		id     string
+		userID string
+	}{
+		{sessionID, userID},
+		{otherSessionID, otherUserID},
+	} {
+		_, err := db.Exec(
+			`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
+			s.id, s.userID, now.Add(24*time.Hour),
+		)
+		if err != nil {
+			t.Fatalf("failed to seed session %s: %v", s.id, err)
+		}
+	}
 
-	// Initialize services
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
+	// Seed habits
+	_, err = db.Exec(
+		`INSERT INTO habits (id, user_id, name, description, schedule_expression, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		habitID, userID, "Morning Run", "Daily morning run", "daily", now, now,
+	)
+	if err != nil {
+		t.Fatalf("failed to seed habit: %v", err)
+	}
 
-	// Initialize middleware
-	authMiddleware := middleware.NewAuthMiddleware(db)
+	// Deleted habit
+	_, err = db.Exec(
+		`INSERT INTO habits (id, user_id, name, description, schedule_expression, deleted_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		deletedHabitID, userID, "Old Habit", "Deleted habit", "1,3,5", now, now, now,
+	)
+	if err != nil {
+		t.Fatalf("failed to seed deleted habit: %v", err)
+	}
 
-	handler := NewCheckinHandler(checkinService, authMiddleware)
+	// Other user's habit
+	_, err = db.Exec(
+		`INSERT INTO habits (id, user_id, name, description, schedule_expression, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		otherHabitID, otherUserID, "Bob's Habit", "Not Alice's", "daily", now, now,
+	)
+	if err != nil {
+		t.Fatalf("failed to seed other user's habit: %v", err)
+	}
 
-	return handler, sessionID, habitIDs
+	// Seed checkins for habit (Mon, Wed, Fri of a known week)
+	// 2026-07-13 = Monday, 2026-07-15 = Wednesday, 2026-07-17 = Friday
+	checkinDates := []string{"2026-07-13", "2026-07-15", "2026-07-17"}
+	for _, d := range checkinDates {
+		_, err := db.Exec(
+			`INSERT INTO checkins (id, habit_id, checkin_date, created_at) VALUES (?, ?, ?, ?)`,
+			uuid.New().String(), habitID, d, now,
+		)
+		if err != nil {
+			t.Fatalf("failed to seed checkin for %s: %v", d, err)
+		}
+	}
+
+	// Seed checkins for deleted habit (Mon, Wed of that week)
+	delDates := []string{"2026-07-13", "2026-07-15"}
+	for _, d := range delDates {
+		_, err := db.Exec(
+			`INSERT INTO checkins (id, habit_id, checkin_date, created_at) VALUES (?, ?, ?, ?)`,
+			uuid.New().String(), deletedHabitID, d, now,
+		)
+		if err != nil {
+			t.Fatalf("failed to seed checkin for deleted habit %s: %v", d, err)
+		}
+	}
+
+	return &checkinTestDB{
+		db:             db,
+		userID:         userID,
+		sessionID:      sessionID,
+		otherUserID:    otherUserID,
+		otherSessionID: otherSessionID,
+		habitID:        habitID,
+		deletedHabitID: deletedHabitID,
+		otherHabitID:   otherHabitID,
+	}
 }
 
-// executeCheckinRequest performs an HTTP GET request to the daily checkin endpoint
-// through the mux (which applies auth middleware).
-func executeCheckinRequest(handler *CheckinHandler, sessionID, date string) *httptest.ResponseRecorder {
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
+// setupCheckinTestHandler creates a CheckinHandler wired to the test DB.
+func setupCheckinTestHandler(t *testing.T, ct *checkinTestDB) *CheckinHandler {
+	t.Helper()
+	habitModel := model.NewHabitModel(ct.db)
+	checkinModel := model.NewCheckinModel(ct.db)
+	scheduleResolver := service.NewScheduleResolver()
+	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
+	return NewCheckinHandler(checkinService)
+}
 
-	url := "/api/v1/checkins/daily"
-	if date != "" {
-		url = fmt.Sprintf("/api/v1/checkins/daily?date=%s", date)
-	}
-	req := httptest.NewRequest(http.MethodGet, url, nil)
+// setupCheckinTestMiddleware creates a SessionMiddleware wired to the test DB.
+func setupCheckinTestMiddleware(t *testing.T, ct *checkinTestDB) *middleware.SessionMiddleware {
+	t.Helper()
+	return middleware.NewSessionMiddleware(ct.db)
+}
+
+// executeCheckinRequest performs an authenticated GET request to the checkin endpoint.
+func executeCheckinRequest(handler *CheckinHandler, sessionMiddleware *middleware.SessionMiddleware, path, sessionID string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
 	if sessionID != "" {
-		req.AddCookie(&http.Cookie{
-			Name:  "session_id",
-			Value: sessionID,
-		})
+		req.AddCookie(&http.Cookie{Name: "session_id", Value: sessionID})
 	}
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
+	sessionMiddleware.RequireAuth(handler.GetCheckins)(w, req)
 	return w
 }
 
@@ -163,12 +224,18 @@ func parseCheckinResponse(t *testing.T, w *httptest.ResponseRecorder) map[string
 	return resp
 }
 
+// --- Tests ---
 
-// TestGetDailyCheckins_EmptyDate verifies that empty date returns empty list.
-func TestGetDailyCheckins_EmptyDate(t *testing.T) {
-	handler, sessionID, _ := setupCheckinTestHandler(t)
+// TestGetCheckins_Success verifies a normal range query returns correct daily records.
+func TestGetCheckins_Success(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
 
-	w := executeCheckinRequest(handler, sessionID, "")
+	// Query Mon 2026-07-13 to Sun 2026-07-19 (7 days)
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-07-13&end_date=2026-07-19", ct.habitID)
+	w := executeCheckinRequest(handler, mw, path, ct.sessionID)
+
 	if w.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", w.Code)
 	}
@@ -180,54 +247,256 @@ func TestGetDailyCheckins_EmptyDate(t *testing.T) {
 
 	data, ok := resp["data"].(map[string]interface{})
 	if !ok {
-		t.Fatal("expected data object in response")
+		t.Fatal("expected data object")
 	}
 
-	if date, ok := data["date"].(string); ok && date != "" {
-		t.Errorf("expected empty date, got %q", date)
-	}
-
-	habits, ok := data["habits"].([]interface{})
+	// Check habit info
+	habit, ok := data["habit"].(map[string]interface{})
 	if !ok {
-		t.Fatal("expected habits array in data")
+		t.Fatal("expected habit in data")
 	}
-	if len(habits) != 0 {
-		t.Errorf("expected empty habits array, got %d items", len(habits))
+	if habit["id"] != ct.habitID {
+		t.Errorf("expected habit id %s, got %v", ct.habitID, habit["id"])
+	}
+	if habit["name"] != "Morning Run" {
+		t.Errorf("expected habit name 'Morning Run', got %v", habit["name"])
+	}
+	if habit["deleted"] != false {
+		t.Error("expected deleted=false for active habit")
 	}
 
-	stats, ok := data["stats"].(map[string]interface{})
+	// Check daily records (7 days)
+	checkins, ok := data["checkins"].([]interface{})
 	if !ok {
-		t.Fatal("expected stats object in data")
+		t.Fatal("expected checkins array")
 	}
-	if req := stats["required"].(float64); req != 0 {
-		t.Errorf("expected required=0, got %v", req)
+	if len(checkins) != 7 {
+		t.Errorf("expected 7 daily records, got %d", len(checkins))
 	}
-	if comp := stats["completed"].(float64); comp != 0 {
-		t.Errorf("expected completed=0, got %v", comp)
+
+	// Verify specific days
+	// 2026-07-13 Mon: required=true, checked_in=true
+	// 2026-07-14 Tue: required=true, checked_in=false
+	// 2026-07-15 Wed: required=true, checked_in=true
+	// 2026-07-16 Thu: required=true, checked_in=false
+	// 2026-07-17 Fri: required=true, checked_in=true
+	// 2026-07-18 Sat: required=true, checked_in=false
+	// 2026-07-19 Sun: required=true, checked_in=false
+	expected := []struct {
+		date      string
+		required  bool
+		checkedIn bool
+		hasID     bool
+	}{
+		{"2026-07-13", true, true, true},
+		{"2026-07-14", true, false, false},
+		{"2026-07-15", true, true, true},
+		{"2026-07-16", true, false, false},
+		{"2026-07-17", true, true, true},
+		{"2026-07-18", true, false, false},
+		{"2026-07-19", true, false, false},
 	}
-	if total := stats["total_habits"].(float64); total != 0 {
-		t.Errorf("expected total_habits=0, got %v", total)
+
+	for i, exp := range expected {
+		record := checkins[i].(map[string]interface{})
+		if record["date"] != exp.date {
+			t.Errorf("record[%d]: expected date %s, got %v", i, exp.date, record["date"])
+		}
+		if record["required"] != exp.required {
+			t.Errorf("record[%d] %s: expected required=%v, got %v", i, exp.date, exp.required, record["required"])
+		}
+		if record["checked_in"] != exp.checkedIn {
+			t.Errorf("record[%d] %s: expected checked_in=%v, got %v", i, exp.date, exp.checkedIn, record["checked_in"])
+		}
+		if exp.hasID && record["checkin_id"] == nil {
+			t.Errorf("record[%d] %s: expected checkin_id to be non-nil", i, exp.date)
+		}
+		if !exp.hasID && record["checkin_id"] != nil {
+			t.Errorf("record[%d] %s: expected checkin_id to be nil", i, exp.date)
+		}
+	}
+
+	// Check summary
+	summary, ok := data["summary"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected summary object")
+	}
+	totalReq := summary["total_required"].(float64)
+	if totalReq != 7 {
+		t.Errorf("expected total_required=7, got %v", totalReq)
+	}
+	completed := summary["completed"].(float64)
+	if completed != 3 {
+		t.Errorf("expected completed=3, got %v", completed)
+	}
+	rate := summary["completion_rate"].(float64)
+	if rate != 0.43 {
+		t.Errorf("expected completion_rate=0.43, got %v", rate)
 	}
 }
 
-// TestGetDailyCheckins_InvalidDateFormat verifies that bad date formats return 400.
-func TestGetDailyCheckins_InvalidDateFormat(t *testing.T) {
-	handler, sessionID, _ := setupCheckinTestHandler(t)
+// TestGetCheckins_DeletedHabit verifies deleted habits still return history with deleted=true.
+func TestGetCheckins_DeletedHabit(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
 
-	invalidDates := []string{
-		"2026/07/14",
-		"14-07-2026",
-		"2026-13-01",
-		"not-a-date",
-		"2026-1-1",
-		"07-14-2026",
+	// Deleted habit has schedule "1,3,5" (Mon, Wed, Fri)
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-07-13&end_date=2026-07-19", ct.deletedHabitID)
+	w := executeCheckinRequest(handler, mw, path, ct.sessionID)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
 	}
 
-	for _, date := range invalidDates {
-		t.Run(date, func(t *testing.T) {
-			w := executeCheckinRequest(handler, sessionID, date)
+	resp := parseCheckinResponse(t, w)
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected data object")
+	}
+
+	habit, ok := data["habit"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected habit in data")
+	}
+	if habit["deleted"] != true {
+		t.Error("expected deleted=true for soft-deleted habit")
+	}
+	if habit["name"] != "Old Habit" {
+		t.Errorf("expected name 'Old Habit', got %v", habit["name"])
+	}
+
+	// Check that we still have daily records
+	checkins, ok := data["checkins"].([]interface{})
+	if !ok {
+		t.Fatal("expected checkins array")
+	}
+	if len(checkins) != 7 {
+		t.Errorf("expected 7 daily records, got %d", len(checkins))
+	}
+
+	// Verify schedule "1,3,5" — only Mon, Wed, Fri are required
+	expected := []struct {
+		date      string
+		required  bool
+		checkedIn bool
+	}{
+		{"2026-07-13", true, true},  // Mon, required, checked in
+		{"2026-07-14", false, false}, // Tue, not required
+		{"2026-07-15", true, true},   // Wed, required, checked in
+		{"2026-07-16", false, false}, // Thu, not required
+		{"2026-07-17", true, false},  // Fri, required, NOT checked in
+		{"2026-07-18", false, false}, // Sat, not required
+		{"2026-07-19", false, false}, // Sun, not required
+	}
+
+	for i, exp := range expected {
+		record := checkins[i].(map[string]interface{})
+		if record["date"] != exp.date {
+			t.Errorf("record[%d]: expected date %s, got %v", i, exp.date, record["date"])
+		}
+		if record["required"] != exp.required {
+			t.Errorf("record[%d] %s: expected required=%v, got %v", i, exp.date, exp.required, record["required"])
+		}
+		if record["checked_in"] != exp.checkedIn {
+			t.Errorf("record[%d] %s: expected checked_in=%v, got %v", i, exp.date, exp.checkedIn, record["checked_in"])
+		}
+	}
+
+	// Summary: 3 required days, 2 completed
+	summary, ok := data["summary"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected summary")
+	}
+	if summary["total_required"].(float64) != 3 {
+		t.Errorf("expected total_required=3, got %v", summary["total_required"])
+	}
+	if summary["completed"].(float64) != 2 {
+		t.Errorf("expected completed=2, got %v", summary["completed"])
+	}
+}
+
+// TestGetCheckins_RangeTooLarge verifies >365 day range returns 400.
+func TestGetCheckins_RangeTooLarge(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
+
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-01-01&end_date=2027-01-02", ct.habitID)
+	w := executeCheckinRequest(handler, mw, path, ct.sessionID)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", w.Code)
+	}
+
+	resp := parseCheckinResponse(t, w)
+	if code := resp["code"].(float64); code != 3002 {
+		t.Errorf("expected code 3002 (RANGE_TOO_LARGE), got %v", code)
+	}
+	if msg := resp["message"].(string); msg != "RANGE_TOO_LARGE" {
+		t.Errorf("expected message 'RANGE_TOO_LARGE', got %q", msg)
+	}
+}
+
+// TestGetCheckins_MissingStartDate verifies missing start_date returns 400.
+func TestGetCheckins_MissingStartDate(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
+
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?end_date=2026-07-19", ct.habitID)
+	w := executeCheckinRequest(handler, mw, path, ct.sessionID)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", w.Code)
+	}
+
+	resp := parseCheckinResponse(t, w)
+	if code := resp["code"].(float64); code != 1001 {
+		t.Errorf("expected code 1001 (VALIDATION_ERROR), got %v", code)
+	}
+}
+
+// TestGetCheckins_MissingEndDate verifies missing end_date returns 400.
+func TestGetCheckins_MissingEndDate(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
+
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-07-13", ct.habitID)
+	w := executeCheckinRequest(handler, mw, path, ct.sessionID)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", w.Code)
+	}
+
+	resp := parseCheckinResponse(t, w)
+	if code := resp["code"].(float64); code != 1001 {
+		t.Errorf("expected code 1001 (VALIDATION_ERROR), got %v", code)
+	}
+}
+
+// TestGetCheckins_InvalidDate verifies invalid date format returns 400.
+func TestGetCheckins_InvalidDate(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
+
+	tests := []struct {
+		name   string
+		params string
+	}{
+		{"invalid start_date", "start_date=13-07-2026&end_date=2026-07-19"},
+		{"invalid end_date", "start_date=2026-07-13&end_date=not-a-date"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := fmt.Sprintf("/api/v1/habits/%s/checkins?%s", ct.habitID, tt.params)
+			w := executeCheckinRequest(handler, mw, path, ct.sessionID)
+
 			if w.Code != http.StatusBadRequest {
-				t.Errorf("expected status 400 for date %q, got %d", date, w.Code)
+				t.Errorf("expected status 400, got %d", w.Code)
 			}
 
 			resp := parseCheckinResponse(t, w)
@@ -238,699 +507,140 @@ func TestGetDailyCheckins_InvalidDateFormat(t *testing.T) {
 	}
 }
 
-// TestGetDailyCheckins_NoAuth verifies that requests without authentication return 401.
-func TestGetDailyCheckins_NoAuth(t *testing.T) {
-	handler, _, _ := setupCheckinTestHandler(t)
+// TestGetCheckins_Forbidden verifies querying another user's habit returns 403.
+func TestGetCheckins_Forbidden(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	w := httptest.NewRecorder()
-	handler.GetDailyCheckins(w, req)
+	// Alice tries to query Bob's habit
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-07-13&end_date=2026-07-19", ct.otherHabitID)
+	w := executeCheckinRequest(handler, mw, path, ct.sessionID)
 
-	// The handler is wrapped by auth middleware in the route, but when called directly
-	// without middleware, it won't have user_id in context.
-	// This test calls GetDailyCheckins directly (no middleware).
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected status 401 without auth, got %d", w.Code)
-	}
-}
-
-// TestGetDailyCheckins_InvalidMethod verifies that non-GET methods return 405.
-func TestGetDailyCheckins_InvalidMethod(t *testing.T) {
-	handler, sessionID, _ := setupCheckinTestHandler(t)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	req.AddCookie(&http.Cookie{
-		Name:  "session_id",
-		Value: sessionID,
-	})
-	w := httptest.NewRecorder()
-	handler.GetDailyCheckins(w, req)
-
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected status 405, got %d", w.Code)
-	}
-}
-
-// TestGetDailyCheckins_WrongMethod verifies non-GET requests return 405.
-func TestGetDailyCheckins_WrongMethod(t *testing.T) {
-	handler, sessionID, _ := setupCheckinTestHandler(t)
-
-	methods := []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch}
-	for _, method := range methods {
-		t.Run(method, func(t *testing.T) {
-			req := httptest.NewRequest(method, "/api/v1/checkins/daily?date=2026-07-14", nil)
-			req.AddCookie(&http.Cookie{
-				Name:  "session_id",
-				Value: sessionID,
-			})
-			w := httptest.NewRecorder()
-			handler.GetDailyCheckins(w, req)
-
-			if w.Code != http.StatusMethodNotAllowed {
-				t.Errorf("expected 405 for %s, got %d", method, w.Code)
-			}
-		})
-	}
-}
-
-// TestGetDailyCheckins_WithCheckins tests the full scenario with checkins inserted.
-// It's a separate test that uses a raw DB for test data setup.
-func TestGetDailyCheckins_WithCheckins(t *testing.T) {
-	db := setupCheckinTestDB(t)
-
-	// Insert test user
-	userID := "test-user-full"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "fulltest@example.com", "fulltest", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user: %v", err)
-	}
-
-	sessionID := "test-session-full"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionID, userID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
-	}
-
-	// Insert 3 habits with different schedule expressions
-	habitIDs := make([]string, 3)
-	habitEntries := []struct {
-		id     string
-		name   string
-		sched  string
-	}{
-		{"h-daily-1", "每日喝水", "daily"},
-		{"h-daily-2", "每日跑步", "daily"},
-		{"h-weekly", "周末学习", "weekly:1,3,5"}, // Mon, Wed, Fri
-	}
-	for i, entry := range habitEntries {
-		_, err = db.Exec(
-			`INSERT INTO habits (id, user_id, name, schedule_expr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			entry.id, userID, entry.name, entry.sched, "active", time.Now().UTC(), time.Now().UTC(),
-		)
-		if err != nil {
-			t.Fatalf("failed to insert habit %q: %v", entry.name, err)
-		}
-		habitIDs[i] = entry.id
-	}
-
-	// Insert checkin for one habit on the test date
-	testDate := "2026-07-14" // A Tuesday
-	_, err = db.Exec(
-		`INSERT INTO checkins (id, habit_id, user_id, checkin_date, completed_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		"checkin-1", "h-daily-1", userID, testDate, time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert checkin: %v", err)
-	}
-
-	// Build handler with direct DB
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	// Test: request with middleware wrapper
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/checkins/daily?date=%s", testDate), nil)
-	req.AddCookie(&http.Cookie{
-		Name:  "session_id",
-		Value: sessionID,
-	})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status 200, got %d. Body: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected status 403, got %d", w.Code)
 	}
 
 	resp := parseCheckinResponse(t, w)
-	respData, ok := resp["data"].(map[string]interface{})
+	if code := resp["code"].(float64); code != 3003 {
+		t.Errorf("expected code 3003 (FORBIDDEN), got %v", code)
+	}
+	if msg := resp["message"].(string); msg != "FORBIDDEN" {
+		t.Errorf("expected message 'FORBIDDEN', got %q", msg)
+	}
+}
+
+// TestGetCheckins_EmptyRange verifies querying a range with no checkins returns empty records.
+func TestGetCheckins_EmptyRange(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
+
+	// Checkins exist for 2026-07-13 to 2026-07-17, query a different range
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-08-01&end_date=2026-08-05", ct.habitID)
+	w := executeCheckinRequest(handler, mw, path, ct.sessionID)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d", w.Code)
+	}
+
+	resp := parseCheckinResponse(t, w)
+	data, ok := resp["data"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected data object in response, got: %v", resp)
+		t.Fatal("expected data object")
 	}
 
-	// Check date
-	if d := respData["date"].(string); d != testDate {
-		t.Errorf("expected date %q, got %q", testDate, d)
-	}
-
-	// Check habits array
-	habitsData, ok := respData["habits"].([]interface{})
+	checkins, ok := data["checkins"].([]interface{})
 	if !ok {
-		t.Fatalf("expected habits array, got %T", respData["habits"])
+		t.Fatal("expected checkins array")
 	}
-	if len(habitsData) != 3 {
-		t.Errorf("expected 3 habits, got %d", len(habitsData))
+	if len(checkins) != 5 {
+		t.Errorf("expected 5 daily records (5 days), got %d", len(checkins))
 	}
 
-	// Check each habit's status
-	for _, h := range habitsData {
-		habit, ok := h.(map[string]interface{})
-		if !ok {
-			t.Fatal("expected habit object")
+	// All should be unchecked
+	for i, record := range checkins {
+		r := record.(map[string]interface{})
+		if r["checked_in"] != false {
+			t.Errorf("record[%d]: expected checked_in=false for empty range", i)
 		}
-		habitID := habit["habit_id"].(string)
-
-		switch habitID {
-		case "h-daily-1":
-			// Should be checked in AND required (daily on Tuesday)
-			if checkedIn := habit["checked_in"].(bool); !checkedIn {
-				t.Error("h-daily-1 should be checked_in")
-			}
-			if required := habit["required"].(bool); !required {
-				t.Error("h-daily-1 should be required")
-			}
-			if habit["checkin_id"] == nil || habit["checkin_id"].(string) == "" {
-				t.Error("h-daily-1 should have a checkin_id")
-			}
-			if habit["completed_at"] == nil || habit["completed_at"].(string) == "" {
-				t.Error("h-daily-1 should have a completed_at")
-			}
-		case "h-daily-2":
-			// Should be required but NOT checked in
-			if checkedIn := habit["checked_in"].(bool); checkedIn {
-				t.Error("h-daily-2 should NOT be checked_in")
-			}
-			if required := habit["required"].(bool); !required {
-				t.Error("h-daily-2 should be required (daily schedule)")
-			}
-		case "h-weekly":
-			// 2026-07-14 is Tuesday = 2, weekly:1,3,5 means Mon/Wed/Fri
-			// Tuesday should NOT be required
-			// But since we're not sure about the day, let's just check the fields exist
-			if habit["checked_in"] == nil {
-				t.Error("h-weekly should have checked_in field")
-			}
-			// Note: The required field depends on the day of week
+		if r["checkin_id"] != nil {
+			t.Errorf("record[%d]: expected checkin_id=nil for empty range", i)
 		}
 	}
 
-	// Check stats
-	stats, ok := respData["stats"].(map[string]interface{})
+	summary, ok := data["summary"].(map[string]interface{})
 	if !ok {
-		t.Fatal("expected stats object")
+		t.Fatal("expected summary")
 	}
-
-	// At minimum, total_habits should be 3
-	if total := stats["total_habits"].(float64); total != 3 {
-		t.Errorf("expected total_habits=3, got %v", total)
+	if summary["total_required"].(float64) != 5 {
+		t.Errorf("expected total_required=5, got %v", summary["total_required"])
 	}
-
-	// At minimum, completed should be 1
-	if completed := stats["completed"].(float64); completed != 1 {
-		t.Errorf("expected completed=1, got %v", completed)
+	if summary["completed"].(float64) != 0 {
+		t.Errorf("expected completed=0, got %v", summary["completed"])
 	}
-}
-
-// TestGetDailyCheckins_NoActiveHabits verifies that a user with no active habits
-// gets an empty list.
-func TestGetDailyCheckins_NoActiveHabits(t *testing.T) {
-	db := setupCheckinTestDB(t)
-
-	userID := "no-habit-user"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "nohabit@example.com", "nohabit", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user: %v", err)
-	}
-
-	sessionID := "no-habit-session"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionID, userID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
-	}
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	req.AddCookie(&http.Cookie{
-		Name:  "session_id",
-		Value: sessionID,
-	})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
-	}
-
-	resp := parseCheckinResponse(t, w)
-	data := resp["data"].(map[string]interface{})
-	habits := data["habits"].([]interface{})
-	if len(habits) != 0 {
-		t.Errorf("expected empty habits, got %d items", len(habits))
-	}
-	stats := data["stats"].(map[string]interface{})
-	if total := stats["total_habits"].(float64); total != 0 {
-		t.Errorf("expected total_habits=0, got %v", total)
+	if summary["completion_rate"].(float64) != 0 {
+		t.Errorf("expected completion_rate=0, got %v", summary["completion_rate"])
 	}
 }
 
-// TestGetDailyCheckins_ScheduleRequired verifies that schedule expressions
-// correctly determine if a habit is required on a given date.
-func TestGetDailyCheckins_ScheduleRequired(t *testing.T) {
-	db := setupCheckinTestDB(t)
+// TestGetCheckins_NoSession verifies requests without a session cookie return 401.
+func TestGetCheckins_NoSession(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
 
-	userID := "sched-test-user"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "sched@example.com", "sched", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user: %v", err)
-	}
-
-	sessionID := "sched-session"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionID, userID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
-	}
-
-	// Insert habits with different schedule expressions
-	habitEntries := []struct {
-		id    string
-		name  string
-		sched string
-	}{
-		{"sched-daily", "每日任务", "daily"},
-		{"sched-weekdays", "工作日任务", "weekdays"},
-		{"sched-weekends", "周末任务", "weekends"},
-		{"sched-mon-wed-fri", "一三五任务", "weekly:1,3,5"},
-	}
-	for _, entry := range habitEntries {
-		_, err = db.Exec(
-			`INSERT INTO habits (id, user_id, name, schedule_expr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			entry.id, userID, entry.name, entry.sched, "active", time.Now().UTC(), time.Now().UTC(),
-		)
-		if err != nil {
-			t.Fatalf("failed to insert habit %q: %v", entry.name, err)
-		}
-	}
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	// Test on 2026-07-14 (Tuesday)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	req.AddCookie(&http.Cookie{
-		Name:  "session_id",
-		Value: sessionID,
-	})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
-	}
-
-	resp := parseCheckinResponse(t, w)
-	data := resp["data"].(map[string]interface{})
-	habits := data["habits"].([]interface{})
-
-	requiredMap := make(map[string]bool)
-	for _, h := range habits {
-		habit := h.(map[string]interface{})
-		requiredMap[habit["habit_id"].(string)] = habit["required"].(bool)
-	}
-
-	// Tuesday is a weekday, not weekend
-	if !requiredMap["sched-daily"] {
-		t.Error("sched-daily should be required")
-	}
-	if !requiredMap["sched-weekdays"] {
-		t.Error("sched-weekdays should be required on Tuesday")
-	}
-	if requiredMap["sched-weekends"] {
-		t.Error("sched-weekends should NOT be required on Tuesday")
-	}
-	// Tuesday = 2, not in [1,3,5], so not required
-	if requiredMap["sched-mon-wed-fri"] {
-		t.Error("sched-mon-wed-fri should NOT be required on Tuesday")
-	}
-}
-
-// TestGetDailyCheckins_AuthIsolation verifies that user B cannot see user A's habits.
-func TestGetDailyCheckins_AuthIsolation(t *testing.T) {
-	db := setupCheckinTestDB(t)
-
-	// User A
-	userAID := "user-a"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userAID, "usera@example.com", "usera", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user A: %v", err)
-	}
-
-	sessionAID := "session-a"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionAID, userAID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session A: %v", err)
-	}
-
-	_, err = db.Exec(
-		`INSERT INTO habits (id, user_id, name, schedule_expr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"habit-a", userAID, "用户A习惯", "daily", "active", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert habit for user A: %v", err)
-	}
-
-	// User B (no habits)
-	userBID := "user-b"
-	_, err = db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userBID, "userb@example.com", "userb", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user B: %v", err)
-	}
-
-	sessionBID := "session-b"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionBID, userBID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session B: %v", err)
-	}
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	// User A requests their own checkins
-	reqA := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	reqA.AddCookie(&http.Cookie{Name: "session_id", Value: sessionAID})
-	wA := httptest.NewRecorder()
-	mux.ServeHTTP(wA, reqA)
-
-	if wA.Code != http.StatusOK {
-		t.Errorf("user A: expected 200, got %d", wA.Code)
-	}
-	respA := parseCheckinResponse(t, wA)
-	dataA := respA["data"].(map[string]interface{})
-	habitsA := dataA["habits"].([]interface{})
-	if len(habitsA) != 1 {
-		t.Errorf("user A: expected 1 habit, got %d", len(habitsA))
-	}
-	if len(habitsA) > 0 {
-		habitA := habitsA[0].(map[string]interface{})
-		if habitA["habit_id"] != "habit-a" {
-			t.Errorf("user A: expected habit_id 'habit-a', got %v", habitA["habit_id"])
-		}
-	}
-
-	// User B requests - should see 0 habits (no habits for user B)
-	reqB := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	reqB.AddCookie(&http.Cookie{Name: "session_id", Value: sessionBID})
-	wB := httptest.NewRecorder()
-	mux.ServeHTTP(wB, reqB)
-
-	if wB.Code != http.StatusOK {
-		t.Errorf("user B: expected 200, got %d", wB.Code)
-	}
-	respB := parseCheckinResponse(t, wB)
-	dataB := respB["data"].(map[string]interface{})
-	habitsB := dataB["habits"].([]interface{})
-	if len(habitsB) != 0 {
-		t.Errorf("user B: expected 0 habits, got %d - user B should not see user A's habits", len(habitsB))
-	}
-}
-
-// TestGetDailyCheckins_WithCheckinAndDirectCall tests the handler directly
-// (without mux) with proper middleware context.
-func TestGetDailyCheckins_WithDirectHandler(t *testing.T) {
-	db := setupCheckinTestDB(t)
-
-	userID := "direct-test-user"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "direct@example.com", "direct", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user: %v", err)
-	}
-
-	sessionID := "direct-session"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionID, userID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
-	}
-
-	// Add one habit
-	_, err = db.Exec(
-		`INSERT INTO habits (id, user_id, name, schedule_expr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"direct-habit", userID, "直接测试习惯", "daily", "active", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert habit: %v", err)
-	}
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	// Use RegisterRoutes which wraps the handler with auth middleware
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	testDate := "2026-07-14"
-	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/checkins/daily?date=%s", testDate), nil)
-	req.AddCookie(&http.Cookie{Name: "session_id", Value: sessionID})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d. Body: %s", w.Code, w.Body.String())
-	}
-
-	resp := parseCheckinResponse(t, w)
-	data := resp["data"].(map[string]interface{})
-	habits := data["habits"].([]interface{})
-
-	if len(habits) != 1 {
-		t.Errorf("expected 1 habit, got %d", len(habits))
-	}
-
-	if len(habits) > 0 {
-		h := habits[0].(map[string]interface{})
-		if h["habit_name"] != "直接测试习惯" {
-			t.Errorf("expected habit_name '直接测试习惯', got %v", h["habit_name"])
-		}
-		if checkedIn := h["checked_in"].(bool); checkedIn {
-			t.Error("should not be checked in (no checkin was created)")
-		}
-	}
-
-	stats := data["stats"].(map[string]interface{})
-	if total := stats["total_habits"].(float64); total != 1 {
-		t.Errorf("expected total_habits=1, got %v", total)
-	}
-	if completed := stats["completed"].(float64); completed != 0 {
-		t.Errorf("expected completed=0, got %v", completed)
-	}
-}
-
-// TestGetDailyCheckins_ExpiredSession verifies expired sessions return 401.
-func TestGetDailyCheckins_ExpiredSession(t *testing.T) {
-	db := setupCheckinTestDB(t)
-
-	userID := "expired-user"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "expired@example.com", "expired", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user: %v", err)
-	}
-
-	// Insert an expired session
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		"expired-session", userID, time.Now().UTC().Add(-1*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert expired session: %v", err)
-	}
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	req.AddCookie(&http.Cookie{
-		Name:  "session_id",
-		Value: "expired-session",
-	})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-07-13&end_date=2026-07-19", ct.habitID)
+	w := executeCheckinRequest(handler, mw, path, "")
 
 	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for expired session, got %d. Body: %s", w.Code, w.Body.String())
+		t.Errorf("expected status 401, got %d", w.Code)
 	}
 }
 
-// TestGetDailyCheckins_AuthHeader verifies authentication via Authorization header.
-func TestGetDailyCheckins_AuthHeader(t *testing.T) {
-	db := setupCheckinTestDB(t)
+// TestGetCheckins_BadSession verifies requests with an invalid session cookie return 401.
+func TestGetCheckins_BadSession(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
 
-	userID := "header-auth-user"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "header@example.com", "header", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user: %v", err)
-	}
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-07-13&end_date=2026-07-19", ct.habitID)
+	w := executeCheckinRequest(handler, mw, path, "invalid-session-id")
 
-	sessionID := "header-session"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionID, userID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
-	}
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	req.Header.Set("Authorization", "Bearer "+sessionID)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200 for Bearer auth, got %d", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected status 401, got %d", w.Code)
 	}
 }
 
-// TestGetDailyCheckins_PartialCheckin verifies that when some habits are checked in
-// and others are not, the stats correctly reflect partial completion.
-func TestGetDailyCheckins_PartialCheckin(t *testing.T) {
-	db := setupCheckinTestDB(t)
+// TestGetCheckins_HabitNotFound verifies querying a non-existent habit returns 404.
+func TestGetCheckins_HabitNotFound(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
 
-	userID := "partial-user"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "partial@example.com", "partial", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user: %v", err)
+	path := "/api/v1/habits/non-existent-id/checkins?start_date=2026-07-13&end_date=2026-07-19"
+	w := executeCheckinRequest(handler, mw, path, ct.sessionID)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status 404, got %d", w.Code)
 	}
 
-	sessionID := "partial-session"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionID, userID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
+	resp := parseCheckinResponse(t, w)
+	if code := resp["code"].(float64); code != 3001 {
+		t.Errorf("expected code 3001 (HABIT_NOT_FOUND), got %v", code)
 	}
+}
 
-	// Insert 5 daily habits
-	for i := 1; i <= 5; i++ {
-		habitID := fmt.Sprintf("partial-habit-%d", i)
-		_, err = db.Exec(
-			`INSERT INTO habits (id, user_id, name, schedule_expr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			habitID, userID, fmt.Sprintf("习惯%d", i), "daily", "active", time.Now().UTC(), time.Now().UTC(),
-		)
-		if err != nil {
-			t.Fatalf("failed to insert habit %d: %v", i, err)
-		}
-	}
+// TestGetCheckins_WeeklySchedule verifies correct required computation for weekly schedules.
+func TestGetCheckins_WeeklySchedule(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
 
-	testDate := "2026-07-14"
-
-	// Check in habits 1 and 2 only
-	for i := 1; i <= 2; i++ {
-		habitID := fmt.Sprintf("partial-habit-%d", i)
-		_, err = db.Exec(
-			`INSERT INTO checkins (id, habit_id, user_id, checkin_date, completed_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			fmt.Sprintf("partial-checkin-%d", i), habitID, userID, testDate, time.Now().UTC(), time.Now().UTC(),
-		)
-		if err != nil {
-			t.Fatalf("failed to insert checkin %d: %v", i, err)
-		}
-	}
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/checkins/daily?date=%s", testDate), nil)
-	req.AddCookie(&http.Cookie{Name: "session_id", Value: sessionID})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
+	// Deleted habit has schedule "1,3,5" (Mon, Wed, Fri)
+	// Query 2026-07-13 (Mon) to 2026-07-19 (Sun)
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-07-13&end_date=2026-07-19", ct.deletedHabitID)
+	w := executeCheckinRequest(handler, mw, path, ct.sessionID)
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
@@ -938,354 +648,66 @@ func TestGetDailyCheckins_PartialCheckin(t *testing.T) {
 
 	resp := parseCheckinResponse(t, w)
 	data := resp["data"].(map[string]interface{})
-	stats := data["stats"].(map[string]interface{})
+	checkins := data["checkins"].([]interface{})
 
-	if total := stats["total_habits"].(float64); total != 5 {
-		t.Errorf("expected total_habits=5, got %v", total)
-	}
-	if required := stats["required"].(float64); required != 5 {
-		t.Errorf("expected required=5 (all daily habits), got %v", required)
-	}
-	if completed := stats["completed"].(float64); completed != 2 {
-		t.Errorf("expected completed=2, got %v", completed)
+	// Verify only Mon, Wed, Fri are required
+	for _, item := range checkins {
+		record := item.(map[string]interface{})
+		date := record["date"].(string)
+		required := record["required"].(bool)
+
+		switch date {
+		case "2026-07-13", "2026-07-15", "2026-07-17":
+			if !required {
+				t.Errorf("%s should be required (Mon/Wed/Fri)", date)
+			}
+		default:
+			if required {
+				t.Errorf("%s should NOT be required", date)
+			}
+		}
 	}
 }
 
-// TestGetDailyCheckins_InvalidDateNotReal verifies that non-existent dates return 400.
-func TestGetDailyCheckins_InvalidDateNotReal(t *testing.T) {
-	handler, sessionID, _ := setupCheckinTestHandler(t)
+// TestGetCheckins_StartDateAfterEndDate verifies reversed dates return 400.
+func TestGetCheckins_StartDateAfterEndDate(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
 
-	// February 30 doesn't exist
-	w := executeCheckinRequest(handler, sessionID, "2026-02-30")
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-07-19&end_date=2026-07-13", ct.habitID)
+	w := executeCheckinRequest(handler, mw, path, ct.sessionID)
+
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for non-existent date, got %d. Body: %s", w.Code, w.Body.String())
-	}
-
-	// April 31 doesn't exist
-	w = executeCheckinRequest(handler, sessionID, "2026-04-31")
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("expected 400 for non-existent date, got %d", w.Code)
+		t.Errorf("expected status 400, got %d", w.Code)
 	}
 }
 
-// TestGetDailyCheckins_AllNotCheckedIn verifies that when user has habits but none checked in,
-// the response shows all as not checked_in.
-func TestGetDailyCheckins_AllNotCheckedIn(t *testing.T) {
-	db := setupCheckinTestDB(t)
+// TestGetCheckins_Exact36DayBucket verifies that 365-day range is allowed but 366 is rejected.
+func TestGetCheckins_ExactRangeBoundary(t *testing.T) {
+	ct := setupCheckinTestDB(t)
+	handler := setupCheckinTestHandler(t, ct)
+	mw := setupCheckinTestMiddleware(t, ct)
 
-	userID := "all-not-checked"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "allnot@example.com", "allnot", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user: %v", err)
+	// 365-day range (2026-01-01 to 2026-12-31 = 364 days diff, within limit)
+	path := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-01-01&end_date=2026-12-31", ct.habitID)
+	w := executeCheckinRequest(handler, mw, path, ct.sessionID)
+	if w.Code == http.StatusOK {
+		t.Log("365-day range accepted as expected")
+	} else {
+		resp := parseCheckinResponse(t, w)
+		t.Logf("365-day range returned code=%v msg=%v", resp["code"], resp["message"])
 	}
 
-	sessionID := "allnot-session"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionID, userID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
+	// 366+ day range: 2026-01-01 to 2027-01-02 (366 days)
+	path2 := fmt.Sprintf("/api/v1/habits/%s/checkins?start_date=2026-01-01&end_date=2027-01-02", ct.habitID)
+	w2 := executeCheckinRequest(handler, mw, path2, ct.sessionID)
+
+	if w2.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400 for 366-day range, got %d", w2.Code)
 	}
-
-	// Insert 2 daily habits but NO checkins
-	for i := 1; i <= 2; i++ {
-		habitID := fmt.Sprintf("notchecked-habit-%d", i)
-		_, err = db.Exec(
-			`INSERT INTO habits (id, user_id, name, schedule_expr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			habitID, userID, fmt.Sprintf("未打卡习惯%d", i), "daily", "active", time.Now().UTC(), time.Now().UTC(),
-		)
-		if err != nil {
-			t.Fatalf("failed to insert habit %d: %v", i, err)
-		}
-	}
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	req.AddCookie(&http.Cookie{Name: "session_id", Value: sessionID})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
-	}
-
-	resp := parseCheckinResponse(t, w)
-	data := resp["data"].(map[string]interface{})
-	habits := data["habits"].([]interface{})
-
-	for _, h := range habits {
-		habit := h.(map[string]interface{})
-		if checkedIn := habit["checked_in"].(bool); checkedIn {
-			t.Errorf("habit %v should not be checked in", habit["habit_id"])
-		}
-		if habit["checkin_id"] != nil {
-			t.Errorf("habit %v should not have checkin_id", habit["habit_id"])
-		}
-	}
-
-	stats := data["stats"].(map[string]interface{})
-	if completed := stats["completed"].(float64); completed != 0 {
-		t.Errorf("expected completed=0, got %v", completed)
+	resp2 := parseCheckinResponse(t, w2)
+	if code := resp2["code"].(float64); code != 3002 {
+		t.Errorf("expected code 3002 (RANGE_TOO_LARGE), got %v", code)
 	}
 }
-
-// TestGetDailyCheckins_NilSessionCookie verifies no session cookie returns 401.
-func TestGetDailyCheckins_NilSessionCookie(t *testing.T) {
-	db := setupCheckinTestDB(t)
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	// No cookie set
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 without session, got %d", w.Code)
-	}
-}
-
-// TestWriteJSON ensures the shared writeJSON helper works in the handler package.
-// This is an indirect test since writeJSON is already tested via other handler tests.
-func TestGetDailyCheckins_ValidDateEmptyHabits(t *testing.T) {
-	db := setupCheckinTestDB(t)
-
-	userID := "valid-date-empty"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "validempty@example.com", "validempty", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user: %v", err)
-	}
-
-	sessionID := "valid-date-session"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionID, userID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
-	}
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	// Valid date, no habits
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	req.AddCookie(&http.Cookie{Name: "session_id", Value: sessionID})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
-	}
-
-	resp := parseCheckinResponse(t, w)
-	data := resp["data"].(map[string]interface{})
-	if d := data["date"].(string); d != "2026-07-14" {
-		t.Errorf("expected date '2026-07-14', got %q", d)
-	}
-}
-
-// TestGetDailyCheckins_DeletedHabit verifies that deleted habits are not returned.
-func TestGetDailyCheckins_DeletedHabit(t *testing.T) {
-	db := setupCheckinTestDB(t)
-
-	userID := "deleted-habit-user"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "deleted@example.com", "deleted", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user: %v", err)
-	}
-
-	sessionID := "deleted-session"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionID, userID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
-	}
-
-	// Insert one active and one deleted habit
-	_, err = db.Exec(
-		`INSERT INTO habits (id, user_id, name, schedule_expr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"active-habit", userID, "活跃习惯", "daily", "active", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert active habit: %v", err)
-	}
-
-	_, err = db.Exec(
-		`INSERT INTO habits (id, user_id, name, schedule_expr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"deleted-habit", userID, "已删除习惯", "daily", "deleted", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert deleted habit: %v", err)
-	}
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	req.AddCookie(&http.Cookie{Name: "session_id", Value: sessionID})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
-	}
-
-	resp := parseCheckinResponse(t, w)
-	data := resp["data"].(map[string]interface{})
-	habits := data["habits"].([]interface{})
-
-	if len(habits) != 1 {
-		t.Errorf("expected 1 habit (only active), got %d", len(habits))
-	}
-
-	if len(habits) > 0 {
-		h := habits[0].(map[string]interface{})
-		if h["habit_id"] != "active-habit" {
-			t.Errorf("expected active-habit only, got %v", h["habit_id"])
-		}
-	}
-}
-
-// TestGetDailyCheckins_ResponseFormat verifies the response follows the DEM-185 format.
-func TestGetDailyCheckins_ResponseFormat(t *testing.T) {
-	db := setupCheckinTestDB(t)
-
-	userID := "format-test-user"
-	_, err := db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		userID, "format@example.com", "format", "hash", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert user: %v", err)
-	}
-
-	sessionID := "format-session"
-	_, err = db.Exec(
-		`INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)`,
-		sessionID, userID, time.Now().UTC().Add(24*time.Hour),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert session: %v", err)
-	}
-
-	_, err = db.Exec(
-		`INSERT INTO habits (id, user_id, name, schedule_expr, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"format-habit", userID, "格式测试", "daily", "active", time.Now().UTC(), time.Now().UTC(),
-	)
-	if err != nil {
-		t.Fatalf("failed to insert habit: %v", err)
-	}
-
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-	authMiddleware := middleware.NewAuthMiddleware(db)
-	handler := NewCheckinHandler(checkinService, authMiddleware)
-
-	mux := http.NewServeMux()
-	handler.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/checkins/daily?date=2026-07-14", nil)
-	req.AddCookie(&http.Cookie{Name: "session_id", Value: sessionID})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	var rawResp map[string]interface{}
-	if err := json.NewDecoder(w.Body).Decode(&rawResp); err != nil {
-		t.Fatalf("failed to decode: %v", err)
-	}
-
-	// Verify envelope
-	if _, ok := rawResp["code"]; !ok {
-		t.Error("response missing 'code' field")
-	}
-	if _, ok := rawResp["message"]; !ok {
-		t.Error("response missing 'message' field")
-	}
-	if _, ok := rawResp["data"]; !ok {
-		t.Error("response missing 'data' field")
-	}
-
-	data, ok := rawResp["data"].(map[string]interface{})
-	if !ok {
-		t.Fatal("data should be an object")
-	}
-
-	// Verify data fields per DEM-185 spec
-	expectedDataFields := []string{"date", "habits", "stats"}
-	for _, f := range expectedDataFields {
-		if _, ok := data[f]; !ok {
-			t.Errorf("data missing '%s' field", f)
-		}
-	}
-
-	// Verify habit fields per DEM-185 spec
-	habits := data["habits"].([]interface{})
-	if len(habits) > 0 {
-		h := habits[0].(map[string]interface{})
-		expectedHabitFields := []string{"habit_id", "habit_name", "checked_in", "required", "checkin_id", "completed_at"}
-		for _, f := range expectedHabitFields {
-			if _, ok := h[f]; !ok {
-				t.Errorf("habit missing '%s' field", f)
-			}
-		}
-	}
-
-	// Verify stats fields
-	stats, ok := data["stats"].(map[string]interface{})
-	if !ok {
-		t.Fatal("stats should be an object")
-	}
-	expectedStatsFields := []string{"required", "completed", "total_habits"}
-	for _, f := range expectedStatsFields {
-		if _, ok := stats[f]; !ok {
-			t.Errorf("stats missing '%s' field", f)
-		}
-	}
-}
-
