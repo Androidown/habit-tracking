@@ -2,20 +2,19 @@ package model
 
 import (
 	"database/sql"
-	"time"
-
-	"github.com/google/uuid"
 )
 
-// Checkin represents a single check-in record.
+// Checkin represents a single check-in record for a habit.
 type Checkin struct {
-	ID          string    `json:"id"`
-	HabitID     string    `json:"habit_id"`
-	CheckinDate string    `json:"checkin_date"` // YYYY-MM-DD
-	CreatedAt   time.Time `json:"created_at"`
+	ID          string `json:"id"`
+	HabitID     string `json:"habit_id"`
+	UserID      string `json:"user_id"`
+	CheckinDate string `json:"checkin_date"`
+	Note        string `json:"note,omitempty"`
+	CreatedAt   string `json:"created_at"`
 }
 
-// CheckinModel handles checkin database operations.
+// CheckinModel handles check-in database operations.
 type CheckinModel struct {
 	db *sql.DB
 }
@@ -25,74 +24,28 @@ func NewCheckinModel(db *sql.DB) *CheckinModel {
 	return &CheckinModel{db: db}
 }
 
-// Create inserts a new checkin record.
-func (m *CheckinModel) Create(habitID, checkinDate string) (*Checkin, error) {
-	id := uuid.New().String()
-	now := time.Now().UTC()
-
-	_, err := m.db.Exec(
-		`INSERT INTO checkins (id, habit_id, checkin_date, created_at) VALUES (?, ?, ?, ?)`,
-		id, habitID, checkinDate, now,
+// DeleteByHabitID physically deletes all check-in records for the given habit.
+// Returns the number of records deleted.
+func (m *CheckinModel) DeleteByHabitID(habitID string) (int64, error) {
+	result, err := m.db.Exec(
+		`DELETE FROM checkins WHERE habit_id = ?`,
+		habitID,
 	)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-
-	return &Checkin{
-		ID:          id,
-		HabitID:     habitID,
-		CheckinDate: checkinDate,
-		CreatedAt:   now,
-	}, nil
+	return result.RowsAffected()
 }
 
-// FindByHabitAndDateRange returns checkins for a habit within a date range, ordered by date.
-// Uses date() to normalize SQLite DATE values (which may include time components).
-func (m *CheckinModel) FindByHabitAndDateRange(habitID, startDate, endDate string) ([]*Checkin, error) {
-	rows, err := m.db.Query(
-		`SELECT id, habit_id, checkin_date, created_at
-		 FROM checkins
-		 WHERE habit_id = ? AND date(checkin_date) >= date(?) AND date(checkin_date) <= date(?)
-		 ORDER BY checkin_date ASC`,
-		habitID, startDate, endDate,
-	)
+// CountByHabitID returns the number of check-in records for the given habit.
+func (m *CheckinModel) CountByHabitID(habitID string) (int, error) {
+	var count int
+	err := m.db.QueryRow(
+		`SELECT COUNT(*) FROM checkins WHERE habit_id = ?`,
+		habitID,
+	).Scan(&count)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	defer rows.Close()
-
-	var checkins []*Checkin
-	for rows.Next() {
-		c := &Checkin{}
-		// Scan checkin_date as a raw value and normalize to YYYY-MM-DD
-		var rawDate interface{}
-		if err := rows.Scan(&c.ID, &c.HabitID, &rawDate, &c.CreatedAt); err != nil {
-			return nil, err
-		}
-		c.CheckinDate = normalizeDate(rawDate)
-		checkins = append(checkins, c)
-	}
-	return checkins, rows.Err()
-}
-
-// normalizeDate converts a DATE value from SQLite to YYYY-MM-DD string.
-// modernc.org/sqlite may return DATE/TEXT values as time.Time or string.
-func normalizeDate(v interface{}) string {
-	switch val := v.(type) {
-	case time.Time:
-		return val.Format("2006-01-02")
-	case string:
-		if len(val) > 10 {
-			return val[:10]
-		}
-		return val
-	case []byte:
-		s := string(val)
-		if len(s) > 10 {
-			return s[:10]
-		}
-		return s
-	default:
-		return ""
-	}
+	return count, nil
 }

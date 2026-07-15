@@ -36,6 +36,14 @@ func main() {
 	habitModel := model.NewHabitModel(db)
 	checkinModel := model.NewCheckinModel(db)
 
+	authService := service.NewAuthService(userModel, sessionModel)
+	habitService := service.NewHabitService(habitModel, checkinModel)
+
+	authHandler := handler.NewAuthHandler(authService)
+	habitHandler := handler.NewHabitHandler(habitService)
+
+	authMW := middleware.AuthMiddleware(sessionModel)
+
 	// Services
 	authService := service.NewAuthService(userModel, sessionModel)
 	scheduleResolver := service.NewScheduleResolver()
@@ -64,7 +72,8 @@ func main() {
 
 	// Auth routes
 	mux.HandleFunc("/api/v1/auth/register", authHandler.Register)
-	mux.Handle("GET /api/v1/habits/{habit_id}/checkins", sessionMiddleware.RequireAuth(checkinHandler.GetCheckins))
+	mux.Handle("GET /api/v1/habits", authMW(http.HandlerFunc(habitHandler.List)))
+	mux.Handle("DELETE /api/v1/habits/{id}", authMW(http.HandlerFunc(habitHandler.Delete)))
 
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
@@ -117,8 +126,29 @@ func runMigrations(db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`,
+		`CREATE TABLE IF NOT EXISTS habits (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			deleted_at DATETIME DEFAULT NULL,
+			FOREIGN KEY (user_id) REFERENCES users(id)
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_checkins_habit_date ON checkins(habit_id, checkin_date)`,
+		`CREATE INDEX IF NOT EXISTS idx_habits_deleted_at ON habits(deleted_at)`,
+		`CREATE TABLE IF NOT EXISTS checkins (
+			id TEXT PRIMARY KEY,
+			habit_id TEXT NOT NULL,
+			user_id TEXT NOT NULL,
+			checkin_date DATE NOT NULL,
+			note TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (habit_id) REFERENCES habits(id),
+			FOREIGN KEY (user_id) REFERENCES users(id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_checkins_habit_id ON checkins(habit_id)`,
 	}
 
 	for _, m := range migrations {

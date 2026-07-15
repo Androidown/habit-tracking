@@ -25,6 +25,22 @@ func NewSessionModel(db *sql.DB) *SessionModel {
 	return &SessionModel{db: db}
 }
 
+// FindByID looks up a session by its ID.
+func (m *SessionModel) FindByID(id string) (*Session, error) {
+	s := &Session{}
+	err := m.db.QueryRow(
+		`SELECT id, user_id, expires_at FROM sessions WHERE id = ?`,
+		id,
+	).Scan(&s.ID, &s.UserID, &s.ExpiresAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 // Create inserts a new session for the given user.
 func (m *SessionModel) Create(userID string, expiresAt time.Time) (*Session, error) {
 	id := uuid.New().String()

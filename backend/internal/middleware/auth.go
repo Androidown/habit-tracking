@@ -2,96 +2,58 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
-	"log"
 	"net/http"
+	"time"
 
 	"github.com/Androidown/habit-tracking/backend/internal/model"
-	"github.com/Androidown/habit-tracking/backend/internal/service"
 )
 
-// contextKey is a private type to avoid context key collisions.
-type contextKey int
+// contextKey is used for storing values in request context.
+type contextKey string
 
 const (
-	// ContextKeyUser is the key for the authenticated user in the request context.
-	ContextKeyUser contextKey = iota
-	// ContextKeySessionID is the key for the session ID in the request context.
-	ContextKeySessionID
+	// UserIDKey is the context key for the authenticated user's ID.
+	UserIDKey contextKey = "user_id"
 )
 
-// GetUser extracts the authenticated User from a context.
-// Returns nil if the context does not carry a user.
-func GetUser(ctx context.Context) *model.User {
-	u, _ := ctx.Value(ContextKeyUser).(*model.User)
-	return u
-}
-
-// GetSessionID extracts the session ID from a context.
-func GetSessionID(ctx context.Context) (string, bool) {
-	id, ok := ctx.Value(ContextKeySessionID).(string)
-	return id, ok
-}
-
-// AuthMiddleware validates the session cookie and injects the user into the request context.
-type AuthMiddleware struct {
-	authService *service.AuthService
-}
-
-// NewAuthMiddleware creates a new AuthMiddleware.
-func NewAuthMiddleware(authService *service.AuthService) *AuthMiddleware {
-	return &AuthMiddleware{authService: authService}
-}
-
-// Authenticate is an HTTP middleware that checks for a valid session cookie.
-func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie("session_id")
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, service.ErrUnauthorized)
-			return
-		}
-
-		sessionID := cookie.Value
-		if sessionID == "" {
-			writeError(w, http.StatusUnauthorized, service.ErrUnauthorized)
-			return
-		}
-
-		user, err := m.authService.ValidateSession(sessionID)
-		if err != nil {
-			if se := service.AsServiceError(err); se != nil {
-				writeError(w, statusCodeForServiceCode(se.Code), se)
+// AuthMiddleware creates HTTP middleware that validates the session cookie and
+// injects the user ID into the request context. Unauthenticated requests
+// receive a 401 response.
+func AuthMiddleware(sessionModel *model.SessionModel) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cookie, err := r.Cookie("session_id")
+			if err != nil {
+				writeUnauthorized(w)
 				return
 			}
-			log.Printf("session validation error: %v", err)
-			writeError(w, http.StatusUnauthorized, service.ErrUnauthorized)
-			return
-		}
 
-		ctx := context.WithValue(r.Context(), ContextKeyUser, user)
-		ctx = context.WithValue(ctx, ContextKeySessionID, sessionID)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
+			session, err := sessionModel.FindByID(cookie.Value)
+			if err != nil {
+				writeUnauthorized(w)
+				return
+			}
+			if session == nil || time.Now().UTC().After(session.ExpiresAt) {
+				writeUnauthorized(w)
+				return
+			}
 
-func statusCodeForServiceCode(code int) int {
-	switch code {
-	case service.CodeInvalidCredentials:
-		return http.StatusUnauthorized
-	case service.CodeUnauthorized:
-		return http.StatusUnauthorized
-	default:
-		return http.StatusInternalServerError
+			ctx := context.WithValue(r.Context(), UserIDKey, session.UserID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
 	}
 }
 
-func writeError(w http.ResponseWriter, status int, se *service.ServiceError) {
+// GetUserID extracts the authenticated user ID from the request context.
+// Returns empty string if not present.
+func GetUserID(r *http.Request) string {
+	userID, _ := r.Context().Value(UserIDKey).(string)
+	return userID
+}
+
+// writeUnauthorized responds with a 401 Unauthorized JSON payload.
+func writeUnauthorized(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"code":    se.Code,
-		"message": se.Message,
-		"data":    nil,
-	})
+	w.WriteHeader(http.StatusUnauthorized)
+	w.Write([]byte(`{"code":401,"message":"UNAUTHORIZED"}`))
 }
