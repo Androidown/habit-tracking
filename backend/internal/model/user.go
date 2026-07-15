@@ -65,3 +65,19 @@ func (m *UserModel) FindByEmail(email string) (*User, error) {
 	}
 	return u, nil
 }
+
+// FindByID looks up a user by their ID.
+func (m *UserModel) FindByID(id string) (*User, error) {
+	u := &User{}
+	err := m.db.QueryRow(
+		`SELECT id, email, username, password_hash, created_at, updated_at FROM users WHERE id = ?`,
+		id,
+	).Scan(&u.ID, &u.Email, &u.Username, &u.PasswordHash, &u.CreatedAt, &u.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return u, nil
+}

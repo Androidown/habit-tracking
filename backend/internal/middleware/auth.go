@@ -2,129 +2,96 @@ package middleware
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
-	"time"
+
+	"github.com/Androidown/habit-tracking/backend/internal/model"
+	"github.com/Androidown/habit-tracking/backend/internal/service"
 )
 
-// contextKey is a private key type for context values to avoid collisions.
-type contextKey string
+// contextKey is a private type to avoid context key collisions.
+type contextKey int
 
 const (
-	// ContextUserID is the context key for the authenticated user ID.
-	ContextUserID contextKey = "user_id"
+	// ContextKeyUser is the key for the authenticated user in the request context.
+	ContextKeyUser contextKey = iota
+	// ContextKeySessionID is the key for the session ID in the request context.
+	ContextKeySessionID
 )
 
-// AuthMiddleware handles session-based authentication for API requests.
+// GetUser extracts the authenticated User from a context.
+// Returns nil if the context does not carry a user.
+func GetUser(ctx context.Context) *model.User {
+	u, _ := ctx.Value(ContextKeyUser).(*model.User)
+	return u
+}
+
+// GetSessionID extracts the session ID from a context.
+func GetSessionID(ctx context.Context) (string, bool) {
+	id, ok := ctx.Value(ContextKeySessionID).(string)
+	return id, ok
+}
+
+// AuthMiddleware validates the session cookie and injects the user into the request context.
 type AuthMiddleware struct {
-	db *sql.DB
+	authService *service.AuthService
 }
 
 // NewAuthMiddleware creates a new AuthMiddleware.
-func NewAuthMiddleware(db *sql.DB) *AuthMiddleware {
-	return &AuthMiddleware{db: db}
+func NewAuthMiddleware(authService *service.AuthService) *AuthMiddleware {
+	return &AuthMiddleware{authService: authService}
 }
 
-// Authenticate is an HTTP middleware that extracts the user session from the
-// session_id cookie or Authorization header (Bearer <session_id>) and injects
-// the user_id into the request context.
-// If authentication fails, it writes a 401 response and does not call next.
-func (m *AuthMiddleware) Authenticate(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		sessionID := m.extractSessionID(r)
-		if sessionID == "" {
-			writeAuthError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "authentication required")
-			return
-		}
-
-		userID, err := m.validateSession(sessionID)
+// Authenticate is an HTTP middleware that checks for a valid session cookie.
+func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("session_id")
 		if err != nil {
-			log.Printf("auth middleware: session validation error: %v", err)
-			writeAuthError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "authentication required")
-			return
-		}
-		if userID == "" {
-			writeAuthError(w, http.StatusUnauthorized, "SESSION_EXPIRED", "session expired or invalid")
+			writeError(w, http.StatusUnauthorized, service.ErrUnauthorized)
 			return
 		}
 
-		// Inject user_id into context
-		ctx := context.WithValue(r.Context(), ContextUserID, userID)
-		next(w, r.WithContext(ctx))
+		sessionID := cookie.Value
+		if sessionID == "" {
+			writeError(w, http.StatusUnauthorized, service.ErrUnauthorized)
+			return
+		}
+
+		user, err := m.authService.ValidateSession(sessionID)
+		if err != nil {
+			if se := service.AsServiceError(err); se != nil {
+				writeError(w, statusCodeForServiceCode(se.Code), se)
+				return
+			}
+			log.Printf("session validation error: %v", err)
+			writeError(w, http.StatusUnauthorized, service.ErrUnauthorized)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), ContextKeyUser, user)
+		ctx = context.WithValue(ctx, ContextKeySessionID, sessionID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func statusCodeForServiceCode(code int) int {
+	switch code {
+	case service.CodeInvalidCredentials:
+		return http.StatusUnauthorized
+	case service.CodeUnauthorized:
+		return http.StatusUnauthorized
+	default:
+		return http.StatusInternalServerError
 	}
 }
 
-// GetUserID extracts the authenticated user ID from the request context.
-// Returns empty string if not authenticated.
-func GetUserID(r *http.Request) string {
-	if userID, ok := r.Context().Value(ContextUserID).(string); ok {
-		return userID
-	}
-	return ""
-}
-
-// extractSessionID attempts to retrieve the session ID from cookie or
-// Authorization header.
-func (m *AuthMiddleware) extractSessionID(r *http.Request) string {
-	// Try cookie first
-	cookie, err := r.Cookie("session_id")
-	if err == nil && cookie.Value != "" {
-		return cookie.Value
-	}
-
-	// Try Authorization header: Bearer <session_id>
-	authHeader := r.Header.Get("Authorization")
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		return strings.TrimPrefix(authHeader, "Bearer ")
-	}
-
-	return ""
-}
-
-// validateSession checks if the session exists and is not expired.
-// Returns the user_id if valid, empty string if not found/expired.
-func (m *AuthMiddleware) validateSession(sessionID string) (string, error) {
-	var userID string
-	var expiresAt time.Time
-
-	err := m.db.QueryRow(
-		`SELECT user_id, expires_at FROM sessions WHERE id = ?`,
-		sessionID,
-	).Scan(&userID, &expiresAt)
-
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-
-	// Check if session has expired
-	if time.Now().UTC().After(expiresAt) {
-		return "", nil
-	}
-
-	return userID, nil
-}
-
-// authErrorResponse is the JSON response for authentication failures.
-type authErrorResponse struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// writeAuthError writes a JSON authentication error response.
-func writeAuthError(w http.ResponseWriter, status int, code, message string) {
+func writeError(w http.ResponseWriter, status int, se *service.ServiceError) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	resp := authErrorResponse{
-		Code:    401,
-		Message: code,
-	}
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		log.Printf("failed to encode auth error response: %v", err)
-	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"code":    se.Code,
+		"message": se.Message,
+		"data":    nil,
+	})
 }

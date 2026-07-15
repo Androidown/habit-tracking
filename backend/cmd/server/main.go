@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/Androidown/habit-tracking/backend/internal/handler"
 	"github.com/Androidown/habit-tracking/backend/internal/middleware"
@@ -29,36 +30,49 @@ func main() {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
 
-	// Initialize models
+	// Wire dependencies
 	userModel := model.NewUserModel(db)
 	sessionModel := model.NewSessionModel(db)
-	habitModel := model.NewHabitModel(db)
-	checkinModel := model.NewCheckinModel(db)
-
-	// Initialize middleware
-	authMiddleware := middleware.NewAuthMiddleware(db)
-
-	// Initialize services
 	authService := service.NewAuthService(userModel, sessionModel)
-	scheduleResolver := service.NewScheduleResolver()
-	checkinService := service.NewCheckinService(habitModel, checkinModel, scheduleResolver)
-
-	// Initialize handlers
 	authHandler := handler.NewAuthHandler(authService)
-	checkinHandler := handler.NewCheckinHandler(checkinService, authMiddleware)
+	authMiddleware := middleware.NewAuthMiddleware(authService)
 
-	// Register routes
+	// Start periodic expired session cleanup
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := sessionModel.DeleteExpired(); err != nil {
+				log.Printf("session cleanup error: %v", err)
+			}
+		}
+	}()
+
+	// Setup routes
 	mux := http.NewServeMux()
+
+	// Auth routes
 	mux.HandleFunc("/api/v1/auth/register", authHandler.Register)
-	checkinHandler.RegisterRoutes(mux)
+	mux.HandleFunc("/api/v1/auth/login", authHandler.Login)
+	mux.HandleFunc("/api/v1/auth/logout", authMiddleware.Authenticate(http.HandlerFunc(authHandler.Logout)).ServeHTTP)
+	mux.HandleFunc("/api/v1/auth/me", authMiddleware.Authenticate(http.HandlerFunc(authHandler.Me)).ServeHTTP)
+
+	// Health check
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	})
 
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
 		addr = ":8080"
 	}
 
+	// Wrap mux with simple CORS/logging
+	wrapped := loggingMiddleware(mux)
+
 	log.Printf("server listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, wrapped); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
@@ -77,32 +91,11 @@ func runMigrations(db *sql.DB) error {
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL,
 			expires_at DATETIME NOT NULL,
-			FOREIGN KEY (user_id) REFERENCES users(id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS habits (
-			id TEXT PRIMARY KEY,
-			user_id TEXT NOT NULL,
-			name TEXT NOT NULL,
-			schedule_expr TEXT NOT NULL DEFAULT 'daily',
-			status TEXT NOT NULL DEFAULT 'active',
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (user_id) REFERENCES users(id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS checkins (
-			id TEXT PRIMARY KEY,
-			habit_id TEXT NOT NULL,
-			user_id TEXT NOT NULL,
-			checkin_date TEXT NOT NULL,
-			completed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (habit_id) REFERENCES habits(id),
 			FOREIGN KEY (user_id) REFERENCES users(id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_checkins_user_date ON checkins(user_id, checkin_date)`,
 	}
 
 	for _, m := range migrations {
@@ -111,4 +104,11 @@ func runMigrations(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s", r.Method, r.URL.Path)
+		next.ServeHTTP(w, r)
+	})
 }
