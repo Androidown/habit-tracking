@@ -1,0 +1,40 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// 习惯表
+model Habit {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  cycleType   String   @default("daily") @map("cycle_type") // "daily" | "weekly"
+  cycleConfig Json?    @map("cycle_config") // { weekly_target: 3 }
+  userId      String   @map("user_id")
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  checkins Checkin[]
+
+  @@map("habits")
+}
+
+/// 打卡记录表
+model Checkin {
+  id          String   @id @default(uuid())
+  habitId     String   @map("habit_id")
+  userId      String   @map("user_id")
+  checkinDate DateTime @map("checkin_date") @db.Date
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  habit Habit @relation(fields: [habitId], references: [id])
+
+  @@unique([habitId, userId, checkinDate])
+  @@index([habitId, userId, checkinDate], name: "idx_checkin_habit_user_date")
+  @@map("checkins")
+}
