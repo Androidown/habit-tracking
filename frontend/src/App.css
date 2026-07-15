@@ -182,3 +182,174 @@
     border-right-color: var(--border);
   }
 }
+
+/* ================================================================== */
+/*  Habit detail page                                                 */
+/* ================================================================== */
+
+.habit-detail {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 32px 20px;
+  text-align: left;
+}
+
+.habit-detail__title {
+  font-size: 24px;
+  margin: 0 0 24px;
+  color: var(--text-h);
+}
+
+.habit-detail__error {
+  color: #ef4444;
+  text-align: center;
+  padding: 32px;
+}
+
+/* ================================================================== */
+/*  Recent records list                                               */
+/* ================================================================== */
+
+.recent-records {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.recent-records__title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-h);
+}
+
+.recent-records__list {
+  display: flex;
+  flex-direction: column;
+}
+
+.recent-records__loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.recent-records__loading .spinner {
+  border-color: var(--border);
+  border-top-color: var(--accent);
+}
+
+.recent-records__error {
+  padding: 32px;
+  text-align: center;
+}
+
+.recent-records__error-text {
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 12px;
+}
+
+.recent-records__retry-btn {
+  padding: 8px 20px;
+  font-size: 14px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.recent-records__retry-btn:hover {
+  opacity: 0.8;
+}
+
+/* ================================================================== */
+/*  Record item                                                       */
+/* ================================================================== */
+
+.record-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 12px 20px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  cursor: pointer;
+  transition: background-color 0.15s;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  box-sizing: border-box;
+}
+
+.record-item:last-child {
+  border-bottom: none;
+}
+
+.record-item:hover {
+  background: var(--accent-bg);
+}
+
+.record-item--highlighted {
+  background: var(--accent-bg);
+  transition: background-color 0s;
+}
+
+.record-item--cancelled {
+  opacity: 0.6;
+}
+
+.record-item__time {
+  font-size: 15px;
+  color: var(--text-h);
+  font-family: var(--mono, monospace);
+}
+
+.record-item__status {
+  font-size: 13px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+
+.record-item__status--completed {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.record-item__status--cancelled {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+}
+
+/* ================================================================== */
+/*  Empty records                                                     */
+/* ================================================================== */
+
+.empty-records {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 48px 20px;
+  color: var(--text);
+}
+
+.empty-records__illustration {
+  margin-bottom: 16px;
+  color: var(--border);
+}
+
+.empty-records__text {
+  font-size: 15px;
+  color: var(--text);
+}
