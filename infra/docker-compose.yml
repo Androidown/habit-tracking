@@ -1,0 +1,76 @@
+# =============================================================================
+# habit-tracking — Production Docker Compose
+# =============================================================================
+# Services:
+#   app      — Go application server
+#   nginx    — Reverse proxy with HTTPS termination
+# =============================================================================
+
+services:
+  # ── Go Application Server ──────────────────────────────────────────────
+  app:
+    image: ghcr.io/androidown/habit-tracking:${HABIT_TRACKING_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      LISTEN_ADDR: ":8080"
+      DATABASE_PATH: "/data/habit-tracking.db"
+    volumes:
+      # Persist SQLite database outside container
+      - app_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - internal
+
+  # ── Nginx Reverse Proxy ─────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Nginx configuration
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # SSL certificates (mounted from host — certbot manages renewal)
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      # Webroot for HTTP-01 challenge
+      - letsencrypt_www:/var/www/letsencrypt
+      # Static assets served directly by nginx
+      - app_static:/var/www/habit-tracking:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  app_data:
+    driver: local
+  letsencrypt_www:
+    driver: local
+  app_static:
+    driver: local
