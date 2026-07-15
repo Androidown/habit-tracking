@@ -44,9 +44,7 @@ export class AuthMiddleware {
         // Bearer token = session_id
         const session = this.db
           .prepare('SELECT * FROM sessions WHERE id = ?')
-          .get(token) as
-          | { id: string; user_id: string; expires_at: string }
-          | undefined;
+          .get(token) as { id: string; user_id: string; expires_at: string } | undefined;
 
         if (!session) {
           throw new AppError(ErrorCodes.UNAUTHORIZED, 'UNAUTHORIZED');
@@ -62,9 +60,7 @@ export class AuthMiddleware {
 
       const session = this.db
         .prepare('SELECT * FROM sessions WHERE id = ?')
-        .get(sessionId) as
-        | { id: string; user_id: string; expires_at: string }
-        | undefined;
+        .get(sessionId) as { id: string; user_id: string; expires_at: string } | undefined;
 
       if (!session) {
         throw new AppError(ErrorCodes.UNAUTHORIZED, 'UNAUTHORIZED');

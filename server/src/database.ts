@@ -16,10 +16,7 @@ let db: Database.Database | null = null;
 export function getDatabase(dbPath?: string): Database.Database {
   if (db) return db;
 
-  const resolvedPath =
-    dbPath ||
-    process.env.DATABASE_PATH ||
-    path.join(__dirname, '..', '..', 'habit-tracking.db');
+  const resolvedPath = dbPath || process.env.DATABASE_PATH || path.join(__dirname, '..', '..', 'habit-tracking.db');
   db = new Database(resolvedPath);
 
   // 启用 WAL 模式提升并发性能
@@ -80,13 +77,24 @@ function runMigrations(db: Database.Database): void {
       status TEXT NOT NULL DEFAULT 'active',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      deleted_at TEXT,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS checkins (
+      id TEXT PRIMARY KEY,
+      habit_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      checkin_date TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (habit_id) REFERENCES habits(id),
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
     CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_habits_user_id ON habits(user_id);
-    CREATE INDEX IF NOT EXISTS idx_habits_status ON habits(status);
+    CREATE INDEX IF NOT EXISTS idx_checkins_habit_id ON checkins(habit_id);
+    CREATE INDEX IF NOT EXISTS idx_checkins_user_id ON checkins(user_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_checkins_unique ON checkins(habit_id, user_id, checkin_date);
   `);
 }

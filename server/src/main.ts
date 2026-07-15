@@ -5,9 +5,8 @@
  * 中间件注册顺序至关重要：
  *   1. Sentry 请求处理器（最高优先级，为所有请求附加监控上下文）
  *   2. API 响应时间采集中间件
- *   3. 业务路由（打卡记录列表等）
- *   4. /metrics + /health 端点
- *   5. Sentry 全局错误处理器（最后注册，捕获所有未处理异常）
+ *   3. 业务路由（auth、checkin 等）
+ *   4. Sentry 全局错误处理器（最后注册，捕获所有未处理异常）
  */
 
 import express from 'express';
@@ -15,8 +14,8 @@ import cookieParser from 'cookie-parser';
 import { initSentry, sentryRequestHandler, sentryErrorHandler, closeSentry } from './middleware/sentry';
 import { apiMetricsMiddleware, metricsHandler } from './middleware/api-metrics';
 import { monitoringConfig } from './config/monitoring';
-import { getDatabase } from './config/database';
-import habitRoutes from './routes/habits';
+import { getDatabase, closeDatabase } from './database';
+import { registerRoutes } from './routes';
 
 // ---------------------------------------------------------------------------
 // 初始化 Sentry（必须在创建 Express 应用之前）
@@ -49,15 +48,7 @@ app.use(apiMetricsMiddleware);
 
 app.get('/metrics', metricsHandler);
 
-// ---- 初始化数据库 ---------------------------------------------------------
-
-getDatabase();
-
-// ---- 第 3 层：业务路由 ----------------------------------------------------
-
-app.use('/api/v1/habits', habitRoutes);
-
-// ---- 第 4 层：健康检查端点 ------------------------------------------------
+// ---- 健康检查端点 --------------------------------------------------------
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -67,7 +58,13 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// ---- 第 5 层：Sentry 全局错误处理器（必须在路由之后，最后注册） -----------
+// ---- 第 3 层：业务路由 --------------------------------------------------
+
+// 初始化数据库并注册业务路由
+const db = getDatabase();
+registerRoutes(app, db);
+
+// ---- 第 4 层：Sentry 全局错误处理器（必须在路由之后，最后注册） -----------
 
 app.use(sentryErrorHandler);
 

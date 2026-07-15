@@ -33,7 +33,7 @@ export const ErrorMessages: Record<number, string> = {
 
 /**
  * 应用层业务异常。
- * 携带 code / message / data（可选），由错误处理函数统一拾取并序列化。
+ * 携带 code / message / data（可选），由错误处理中间件统一拾取并序列化。
  */
 export class AppError extends Error {
   public readonly code: number;

@@ -4,28 +4,16 @@
  * 提供习惯记录的数据库操作。
  */
 import Database from 'better-sqlite3';
+import { randomUUID } from 'crypto';
 
 export interface HabitRow {
   id: string;
   user_id: string;
   name: string;
   description: string;
-  status: string; // 'active' | 'inactive'
+  status: string; // 'active' | 'deleted'
   created_at: string;
   updated_at: string;
-  deleted_at: string | null;
-}
-
-export interface ListHabitsParams {
-  userId: string;
-  status: 'active' | 'all' | 'archived';
-  page: number;
-  pageSize: number;
-}
-
-export interface ListHabitsResult {
-  items: HabitRow[];
-  total: number;
 }
 
 export class HabitModel {
@@ -52,47 +40,26 @@ export class HabitModel {
   }
 
   /**
-   * 查询习惯列表（支持分页、状态筛选、软删除过滤）。
-   *
-   * 查询逻辑：
-   *   - status=active（默认）：仅返回启用状态且未软删除的记录
-   *   - status=all：返回所有未软删除的记录（含启用和停用）
-   *   - status=archived：仅返回已软删除的记录
-   *   - 始终按 created_at DESC 排序
+   * 创建一条习惯记录。
    */
-  list(params: ListHabitsParams): ListHabitsResult {
-    const { userId, status, page, pageSize } = params;
-    const offset = (page - 1) * pageSize;
-
-    let whereClause = 'WHERE user_id = ?';
-    const queryParams: (string | number)[] = [userId];
-
-    switch (status) {
-      case 'active':
-        whereClause += ' AND deleted_at IS NULL AND status = ?';
-        queryParams.push('active');
-        break;
-      case 'all':
-        whereClause += ' AND deleted_at IS NULL';
-        break;
-      case 'archived':
-        whereClause += ' AND deleted_at IS NOT NULL';
-        break;
-    }
-
-    // 查询总数
-    const countRow = this.db
-      .prepare(`SELECT COUNT(*) as count FROM habits ${whereClause}`)
-      .get(...queryParams) as { count: number };
-    const total = countRow.count;
-
-    // 查询数据（默认按 created_at DESC 排序）
-    const items = this.db
+  create(userId: string, name: string, description: string): HabitRow {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db
       .prepare(
-        `SELECT * FROM habits ${whereClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        `INSERT INTO habits (id, user_id, name, description, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'active', ?, ?)`,
       )
-      .all(...queryParams, pageSize, offset) as HabitRow[];
+      .run(id, userId, name || '', description || '', now, now);
 
-    return { items, total };
+    return {
+      id,
+      user_id: userId,
+      name,
+      description: description || '',
+      status: 'active',
+      created_at: now,
+      updated_at: now,
+    };
   }
 }
