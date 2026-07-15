@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -72,8 +73,7 @@ func main() {
 
 	// Auth routes
 	mux.HandleFunc("/api/v1/auth/register", authHandler.Register)
-	mux.Handle("GET /api/v1/habits", authMW(http.HandlerFunc(habitHandler.List)))
-	mux.Handle("DELETE /api/v1/habits/{id}", authMW(http.HandlerFunc(habitHandler.Delete)))
+	mux.HandleFunc("/api/v1/health", healthHandler)
 
 	addr := os.Getenv("LISTEN_ADDR")
 	if addr == "" {
@@ -87,6 +87,12 @@ func main() {
 	if err := http.ListenAndServe(addr, wrapped); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
+}
+
+// healthHandler responds to health-check requests.
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func runMigrations(db *sql.DB) error {
